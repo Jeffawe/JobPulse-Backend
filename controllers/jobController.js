@@ -1,4 +1,4 @@
-import { addToEmailUpdates } from '../services/emailUpdates.js';
+import { addToEmailUpdates } from '../memoryStore.js';
 import { NLPProcessor } from '../../nlpProcessor.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 

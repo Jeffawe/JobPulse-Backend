@@ -4,7 +4,7 @@ import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
-router.post('/google', authController.createAccount);;
+router.post('/google', authController.googleAuth);;
 router.post('/update-notifications', authenticateToken,UpdateUserNotifications);
 
 export default router;

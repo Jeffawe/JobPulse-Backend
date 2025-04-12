@@ -2,7 +2,7 @@ import { google } from 'googleapis';
 import { connectDB } from '../db/database.js';
 import { v4 as uuidv4 } from 'uuid';
 import { NLPProcessor } from '../../nlpProcessor.js';
-import { addToEmailUpdates } from '../services/emailUpdates.js';
+import { addToEmailUpdates } from '../memoryStore.js';
 import { sendToDiscord, saveToSupabase } from './jobController.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 

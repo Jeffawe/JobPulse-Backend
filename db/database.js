@@ -1,11 +1,13 @@
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dbPath = './db/database.sqlite';
 
 export const initDB = async () => {
+  ensureDBFolderExists();
+
   const db = await connectDB();
 
   await db.exec(`
@@ -27,8 +29,15 @@ export const initDB = async () => {
 };
 
 export const connectDB = async () => {
-    return open({
-      filename: './db/database.sqlite',
-      driver: sqlite3.Database
-    });
-  };
+  return open({
+    filename: dbPath,
+    driver: sqlite3.Database
+  });
+};
+
+const ensureDBFolderExists = () => {
+  const dir = path.dirname(dbPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
