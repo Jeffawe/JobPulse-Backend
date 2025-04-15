@@ -2,8 +2,7 @@ import { google } from 'googleapis';
 
 export const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI // can be postmessage for SPA
+  process.env.GOOGLE_CLIENT_SECRET
 );
 
 export const getOAuth2Client = async (userId) => {
@@ -16,8 +15,7 @@ export const getOAuth2Client = async (userId) => {
   
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
+    process.env.GOOGLE_CLIENT_SECRET
   );
   
   oauth2Client.setCredentials({ refresh_token: user.refresh_token });

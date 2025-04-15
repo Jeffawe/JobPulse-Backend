@@ -12,7 +12,7 @@ app.use(cors());
 app.use(express.json());
 
 //app.use('/api/jobs', jobRoutes);
-app.use('/auth', authRoutes);
-app.use('/api/job', jobRoutes);
+app.use('api/auth', authRoutes);
+app.use('api/job', jobRoutes);
 
 export default app;

@@ -14,6 +14,8 @@ export const authController = {
 
       if (!access_token) throw new Error('Access token not received');
 
+      let firstTime = true;
+
       // Get user info from Google
       const response = await fetch(
         `https://www.googleapis.com/oauth2/v3/userinfo?access_token=${access_token}`
@@ -32,6 +34,7 @@ export const authController = {
       let user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
 
       if (!user) {
+        firstTime = true;
         // Create new user
         await db.run(
           `INSERT INTO users (email, name, refresh_token) VALUES (?, ?, ?)`,
@@ -40,13 +43,14 @@ export const authController = {
 
         user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
       } else {
+        firstTime = false;
         // Update refresh_token if new one is returned
-        if (refresh_token) {
-          await db.run(
-            `UPDATE users SET refresh_token = ? WHERE email = ?`,
-            [refresh_token, userData.email]
-          );
-        }
+        // if (refresh_token) {
+        //   await db.run(
+        //     `UPDATE users SET refresh_token = ? WHERE email = ?`,
+        //     [refresh_token, userData.email]
+        //   );
+        // }
       }
 
       // Create JWT
@@ -56,7 +60,7 @@ export const authController = {
         { expiresIn: '7d' }
       );
 
-      res.json({ token: jwtToken, user });
+      res.json({ token: jwtToken, user, firstTime: firstTime });
 
     } catch (error) {
       console.error('Google auth error:', error);
@@ -66,7 +70,9 @@ export const authController = {
 
   async verify(req, res) {
     try {
-      const userId = req.user.userId;
+      const userId = req.userId;
+
+      if(!userId) return res.status(401).json({ error: 'Unauthorized' });
       const cachedUser = await cacheUtils.getCache(`user:${userId}`);
 
       if (cachedUser) return res.json(cachedUser);
@@ -87,6 +93,10 @@ export const authController = {
 
 // POST /auth/update-notifications
 export const UpdateUserNotifications = async (req, res) => {
+  const userId = req.userId;
+
+  if(!userId) return res.status(401).json({ error: 'Unauthorized' });
+
   const { email, discord_webhook, notification_channel, notification_value } = req.body;
 
   if (!email) {

@@ -1,10 +1,12 @@
 import { addToEmailUpdates } from '../memoryStore.js';
 import { NLPProcessor } from '../../nlpProcessor.js';
 import { getOAuth2Client } from '../services/googleClient.js';
+import { storage } from 'googleapis/build/src/apis/storage/index.js';
 
 export const pollEmails = async (req, res) => {
     try {
       const { userId } = req;
+      let storageLoc = 'discord';
       
       if (!userId) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -53,17 +55,18 @@ export const pollEmails = async (req, res) => {
           
           // Add to shared queue for frontend updates
           addToEmailUpdates(processedEmail);
-          
+
           // Send to appropriate notification channel
           if (user.discord_webhook) {
             await sendToDiscord(user.discord_webhook, processedEmail);
           } else {
+            storageLoc = 'supabase';
             await saveToSupabase(userId, processedEmail);
           }
         }
       }
       
-      return res.status(200).json({ success: true, count: jobEmails.length });
+      return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
     } catch (error) {
       console.error('Error polling emails:', error);
       return res.status(500).json({ error: 'Failed to poll emails' });
