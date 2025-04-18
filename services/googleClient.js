@@ -1,9 +1,18 @@
 import { google } from 'googleapis';
+import dotenv from 'dotenv';
 
-export const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET
-);
+dotenv.config();
+
+export const getOAuth2ClientBasic = () => {  
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
+  );
+
+  return oauth2Client;
+}
+
 
 export const getOAuth2Client = async (userId) => {
   // Get user refresh token from database
@@ -15,7 +24,8 @@ export const getOAuth2Client = async (userId) => {
   
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI
   );
   
   oauth2Client.setCredentials({ refresh_token: user.refresh_token });

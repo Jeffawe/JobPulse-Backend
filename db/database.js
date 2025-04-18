@@ -3,7 +3,16 @@ import { open } from 'sqlite';
 import fs from 'fs';
 import path from 'path';
 
-const dbPath = './db/database.sqlite';
+const dbPath = '../db/database.sqlite';
+
+// export const addColumns = async () => {
+//   const db = await connectDB();
+
+//   await db.exec(`ALTER TABLE users ADD COLUMN notification_status TEXT`);
+//   await db.exec(`ALTER TABLE users ADD COLUMN email_addresses TEXT`);
+
+//   return db;
+// };
 
 export const initDB = async () => {
   ensureDBFolderExists();
@@ -21,7 +30,9 @@ export const initDB = async () => {
       notification_value TEXT,
       gmail_watch_label TEXT,
       gmail_history_id TEXT,
-      gmail_watch_expiration TEXT
+      gmail_watch_expiration TEXT,
+      notification_status TEXT,
+      email_addresses TEXT
     );
   `);
 
