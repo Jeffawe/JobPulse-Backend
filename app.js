@@ -5,6 +5,7 @@ import jobRoutes from './routes/jobRoute.js';
 import authRoutes from './routes/authRoute.js';
 import { verifyApiKey } from './middleware/apikey.js';
 import { initDB } from './db/database.js';
+import { addColumns } from './db/database.js';
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
 
@@ -26,7 +27,7 @@ app.use(limiter);
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'api-key'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'api-key', 'userid'],
     credentials: true,
     exposedHeaders: ['*']
 }));

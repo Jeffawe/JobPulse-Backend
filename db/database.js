@@ -5,14 +5,14 @@ import path from 'path';
 
 const dbPath = '../db/database.sqlite';
 
-// export const addColumns = async () => {
-//   const db = await connectDB();
+export const addColumns = async () => {
+  const db = await connectDB();
 
-//   await db.exec(`ALTER TABLE users ADD COLUMN notification_status TEXT`);
-//   await db.exec(`ALTER TABLE users ADD COLUMN email_addresses TEXT`);
+  await db.exec(`ALTER TABLE users ADD COLUMN discord_id TEXT`);
+  await db.exec(`ALTER TABLE users ADD COLUMN guild_id TEXT`);
 
-//   return db;
-// };
+  return db;
+};
 
 export const initDB = async () => {
   ensureDBFolderExists();
@@ -32,7 +32,9 @@ export const initDB = async () => {
       gmail_history_id TEXT,
       gmail_watch_expiration TEXT,
       notification_status TEXT,
-      email_addresses TEXT
+      email_addresses TEXT,
+      discord_id TEXT,
+      guild_id TEXT
     );
   `);
 
