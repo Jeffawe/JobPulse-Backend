@@ -14,7 +14,6 @@ export const getOAuth2ClientBasic = () => {
   return oauth2Client;
 }
 
-
 export const getOAuth2Client = async (userId) => {
   const db = await connectDB();
 

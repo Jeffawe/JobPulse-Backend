@@ -8,8 +8,7 @@ const dbPath = '../db/database.sqlite';
 export const addColumns = async () => {
   const db = await connectDB();
 
-  await db.exec(`ALTER TABLE users ADD COLUMN discord_id TEXT`);
-  await db.exec(`ALTER TABLE users ADD COLUMN guild_id TEXT`);
+  await db.exec(`ALTER TABLE users ADD COLUMN label_id TEXT`);
 
   return db;
 };
@@ -34,7 +33,8 @@ export const initDB = async () => {
       notification_status TEXT,
       email_addresses TEXT,
       discord_id TEXT,
-      guild_id TEXT
+      guild_id TEXT,
+      label_id TEXT
     );
   `);
 

@@ -2,59 +2,87 @@ import { connectDB } from '../db/database.js';
 import { getOAuth2ClientBasic } from '../services/googleClient.js';
 import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import jwt from 'jsonwebtoken';
+import dotenv from 'dotenv';
+import { google } from 'googleapis';
+
+dotenv.config();
 
 export const authController = {
   async googleAuth(req, res) {
     try {
       const { token } = req.body;
 
+      if (!token) throw new Error("No code provided");
+
       const oauth2Client = getOAuth2ClientBasic();
 
       // Exchange code for tokens
-      const { tokens } = await oauth2Client.getToken(token);
+      const { tokens } = await oauth2Client.getToken({
+        code: token,
+        redirect_uri: process.env.GOOGLE_REDIRECT_URI
+      });
+      oauth2Client.setCredentials(tokens);
+
       const access_token = tokens.access_token;
       const refresh_token = tokens.refresh_token;
 
-      if (!tokens) throw new Error('Tokens not received');
-      if (!access_token) throw new Error('Access token not received');
+      if (!tokens || !access_token) {
+        throw new Error('Failed to retrieve tokens');
+      }
 
       let firstTime = true;
 
-      // Get user info from Google
-      const response = await fetch(
-        `https://www.googleapis.com/oauth2/v3/userinfo?access_token=${access_token}`
-      );
+      const oauth2 = google.oauth2({
+        auth: oauth2Client,
+        version: 'v2',
+      });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Google API error:', errorData);
-        throw new Error('Failed to get user info from Google');
-      }
+      const { data: userData } = await oauth2.userinfo.get();
 
-      const userData = await response.json();
       const db = await connectDB();
+
 
       // Check if user exists
       let user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
 
       if (!user) {
         firstTime = true;
-        // Create new user
+
+        const { success, labelId } = await createGmailFilter(oauth2Client);
+        const label = success ? labelId : null;
+
         await db.run(
-          `INSERT INTO users (email, name, refresh_token, discord_webhook) VALUES (?, ?, ?, ?)`,
-          [userData.email, userData.name, refresh_token, "NULL" || null]
+          `INSERT INTO users (email, name, refresh_token, discord_webhook, label_id) VALUES (?, ?, ?, ?, ?)`,
+          [userData.email, userData.name, refresh_token, "NULL" || null, label]
         );
 
         user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
       } else {
         firstTime = false;
-        // Update refresh_token if new one is returned
-        // if (refresh_token) {
-        //   await db.run(
-        //     `UPDATE users SET refresh_token = ? WHERE email = ?`,
-        //     [refresh_token, userData.email]
-        //   );
-        // }
+
+        let finalLabel = user.label_id;
+        let update = false;
+
+        // If user has no label, create one
+        if (!user.label_id) {
+          const { success, labelId } = await createGmailFilter(oauth2Client);
+          if (success) {
+            finalLabel = labelId;
+            update = true;
+          }
+        }
+
+        // If refresh_token is present, we should update
+        if (refresh_token) {
+          update = true;
+        }
+
+        if (update) {
+          await db.run(
+            `UPDATE users SET refresh_token = COALESCE(?, refresh_token), label_id = COALESCE(?, label_id) WHERE email = ?`,
+            [refresh_token, finalLabel, userData.email]
+          );
+        }
       }
 
       // Create JWT
@@ -72,21 +100,81 @@ export const authController = {
     }
   },
 
+  async createGmailFilterEndPoint(req, res) {
+    try {
+      const userId = req.userId;
+  
+      if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+  
+      const db = await connectDB();
+  
+      let cachedUser = await cacheUtils.getCache(`userbasic:${userId}`);
+  
+      if (!cachedUser) {
+        cachedUser = await db.get(`
+          SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id
+          FROM users
+          WHERE id = ?
+        `, [userId]);
+  
+        if (!cachedUser) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+      }
+
+      const tokenRow = await db.get(
+        `SELECT refresh_token FROM users WHERE id = ?`,
+        [userId]
+      );
+      
+      if (!tokenRow?.refresh_token) {
+        return res.status(401).json({ error: 'No refresh token available' });
+      }
+  
+      const oauth2Client = getOAuth2ClientBasic();
+      oauth2Client.setCredentials({ refresh_token: tokenRow.refresh_token });
+      const { success, labelId } = await createGmailFilter(oauth2Client);
+  
+      if (success && labelId) {
+        await db.run(
+          `UPDATE users SET label_id = ? WHERE id = ?`,
+          [labelId, cachedUser.id]
+        );
+  
+        // Update cache object and reset it
+        cachedUser.label_id = labelId;
+        await cacheUtils.setCache(`userbasic:${userId}`, cachedUser, CACHE_DURATIONS.USER_PROFILE);
+      }
+  
+      res.status(200).json(cachedUser);
+  
+    } catch (error) {
+      console.error('Error Creating Filter:', error);
+      res.status(500).json({ error: 'Server Error: Failed to create filter' });
+    }
+  },
+
   async verify(req, res) {
     try {
       const userId = req.userId;
 
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-      const cachedUser = await cacheUtils.getCache(`user:${userId}`);
+      const cachedUser = await cacheUtils.getCache(`userbasic:${userId}`);
 
       if (cachedUser) return res.json(cachedUser);
 
       const db = await connectDB();
-      const user = await db.get(`SELECT id, email, name, discord_webhook, notification_channel, notification_value FROM users WHERE id = ?`, [userId]);
+      const user = await db.get(`
+        SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id
+        FROM users
+        WHERE id = ?
+      `, [userId]);
 
       if (!user) return res.status(404).json({ error: 'User not found' });
 
-      await cacheUtils.setCache(`user:${userId}`, user, CACHE_DURATIONS.USER_PROFILE);
+      await cacheUtils.setCache(`userbasic:${userId}`, user, CACHE_DURATIONS.USER_PROFILE);
       res.json(user);
     } catch (error) {
       console.error('Verification error:', error);
@@ -97,20 +185,20 @@ export const authController = {
   async deleteAccount(req, res) {
     try {
       if (!req.userId) return res.status(401).json({ error: 'Unauthorized' });
-  
+
       const userId = req.params.userId;
       if (!userId) {
         return res.status(400).json({ error: 'User ID is required' });
       }
-  
+
       const db = await connectDB();
-  
+
       // Fetch user first to get refresh_token
       const user = await db.get(`SELECT * FROM users WHERE id = ?`, [userId]);
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-  
+
       // Revoke Google refresh token if it exists
       if (user.refresh_token) {
         try {
@@ -126,24 +214,90 @@ export const authController = {
           // continue anyway — this shouldn’t block account deletion
         }
       }
-  
+
       // Delete user from DB
       const result = await db.run(`DELETE FROM users WHERE id = ?`, [userId]);
       if (result.changes === 0) {
         return res.status(404).json({ error: 'User not found' });
       }
-  
+
       // Clear cache
-      await cacheUtils.deleteCache(`user:${userId}`);
-  
+      await cacheUtils.deleteCache(`userbasic:${userId}`);
+
       res.status(200).json({ message: 'Account deleted and access revoked' });
     } catch (error) {
       console.error('Delete account error:', error);
       res.status(500).json({ error: 'Failed to delete account' });
     }
   }
-  
+
 };
+
+export const createGmailFilter = async (oauth2Client) => {
+  const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+  const labelName = 'JobPulseTracker';
+  const query = 'subject:(application OR interview OR opportunity OR opening OR "your application") OR from:(jobs-noreply@linkedin.com OR indeedemail.com OR bounce@jobvite.com OR notifications@lever.co OR @greenhouse.io)';
+
+  try {
+    // 1. Get all labels
+    const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+    const labels = labelsRes.data.labels || [];
+
+    // 2. Check if label already exists
+    let label = labels.find(l => l.name === labelName);
+
+    if (!label) {
+      // 3. Create label if it doesn't exist
+      const createRes = await gmail.users.labels.create({
+        userId: 'me',
+        requestBody: {
+          name: labelName,
+          labelListVisibility: 'labelShow',
+          messageListVisibility: 'show',
+        },
+      });
+
+      label = createRes.data;
+      console.log('Label created:', label.id);
+    } else {
+      console.log('Label already exists:', label.id);
+    }
+
+    // 4. Check if a filter already exists with the same query + label
+    const filtersRes = await gmail.users.settings.filters.list({ userId: 'me' });
+    const filters = filtersRes.data.filter || [];
+
+    const filterExists = filters.some(f =>
+      f.criteria?.query === query &&
+      f.action?.addLabelIds?.includes(label.id)
+    );
+
+    if (!filterExists) {
+      // 5. Create the filter
+      const filterRes = await gmail.users.settings.filters.create({
+        userId: 'me',
+        requestBody: {
+          criteria: {
+            query, // You can also use "from", "subject", etc.
+          },
+          action: {
+            addLabelIds: [label.id],
+            removeLabelIds: ['INBOX'], // optional: auto-archive
+          },
+        },
+      });
+
+      console.log('Filter created:', filterRes.data.id);
+    } else {
+      console.log('Filter already exists for this query and label');
+    }
+
+    return { success: true, labelId: label.id };
+  } catch (err) {
+    console.error('Error setting up Gmail filter/label:', err);
+    return { success: false, error: err.message };
+  }
+}
 
 export const UpdateUserNotifications = async (req, res) => {
   const userId = req.userId;
@@ -181,7 +335,7 @@ export const UpdateUserNotifications = async (req, res) => {
     // Get the updated user from DB
     const updatedUser = await db.get(`SELECT * FROM users WHERE email = ?`, [email]);
 
-    await cacheUtils.deleteCache(`user:${userId}`);
+    await cacheUtils.deleteCache(`userbasic:${userId}`);
 
     return res.status(200).json(updatedUser);
 
