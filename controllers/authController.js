@@ -236,7 +236,28 @@ export const authController = {
 export const createGmailFilter = async (oauth2Client) => {
   const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
   const labelName = 'JobPulseTracker';
-  const query = 'subject:(application OR interview OR opportunity OR opening OR "your application") OR from:(jobs-noreply@linkedin.com OR indeedemail.com OR bounce@jobvite.com OR notifications@lever.co OR @greenhouse.io)';
+  
+  const query = `
+    (subject:("application received" OR "thank you for your application" OR "application status" OR 
+             "we received your application" OR "application confirmation" OR "interview invitation" OR
+             "interview request" OR "schedule an interview" OR "job offer" OR "position update" OR
+             "next steps" OR "assessment invitation" OR "hiring process" OR "thanks for applying" OR
+             "we're reviewing your application" OR "application submission" OR "phone screen" OR
+             "technical interview" OR "onsite interview" OR "job application" OR "your candidacy"))
+    OR
+    (from:(jobs-noreply@linkedin.com OR careers@linkedin.com OR *@indeedemail.com OR 
+           *@bounce.jobvite.com OR *@notifications.lever.co OR *@greenhouse.io OR
+           *@workday.com OR *@taleo.net OR *@brassring.com OR *@smartrecruiters.com OR
+           *@icims.com OR *@ultipro.com OR *@myworkdayjobs.com OR *@successfactors.com OR
+           *@bamboohr.com OR *@recruitee.com OR *@zohorecruit.com OR *@ashbyhq.com OR
+           *@workable.com OR *@hire.lever.co OR *@eightfold.ai OR *@manatalportal.com OR
+           *@app.jazz.co OR noreply@hired.com OR *@indeed.com OR *@ziprecruiter.com OR
+           *@monster.com OR *@careerbuilder.com OR *@dice.com OR *@wellfound.com OR
+           *@talent.com OR *@angel.co OR *@remoteco.com OR *@simplyhired.com OR
+           jobs@greenhouse.io OR talent@*) 
+     -subject:("who's viewed" OR "weekly" OR "digest" OR "network" OR "profile views" OR "trending" OR
+              "updates" OR "news" OR "newsletter" OR "subscription"))
+  `;
 
   try {
     // 1. Get all labels
@@ -254,6 +275,10 @@ export const createGmailFilter = async (oauth2Client) => {
           name: labelName,
           labelListVisibility: 'labelShow',
           messageListVisibility: 'show',
+          color: {
+            backgroundColor: '#4986e7', // Blue background
+            textColor: '#ffffff'        // White text
+          }
         },
       });
 
@@ -267,35 +292,49 @@ export const createGmailFilter = async (oauth2Client) => {
     const filtersRes = await gmail.users.settings.filters.list({ userId: 'me' });
     const filters = filtersRes.data.filter || [];
 
-    const filterExists = filters.some(f =>
-      f.criteria?.query === query &&
+    // Find and delete any existing JobPulseTracker filters to avoid duplicates
+    const existingFilters = filters.filter(f => 
       f.action?.addLabelIds?.includes(label.id)
     );
-
-    if (!filterExists) {
-      // 5. Create the filter
-      const filterRes = await gmail.users.settings.filters.create({
-        userId: 'me',
-        requestBody: {
-          criteria: {
-            query, // You can also use "from", "subject", etc.
-          },
-          action: {
-            addLabelIds: [label.id],
-            removeLabelIds: ['INBOX'], // optional: auto-archive
-          },
-        },
-      });
-
-      console.log('Filter created:', filterRes.data.id);
-    } else {
-      console.log('Filter already exists for this query and label');
+    
+    if (existingFilters.length > 0) {
+      console.log(`Removing ${existingFilters.length} existing filters for this label`);
+      for (const filter of existingFilters) {
+        await gmail.users.settings.filters.delete({
+          userId: 'me',
+          id: filter.id
+        });
+        console.log(`Deleted old filter: ${filter.id}`);
+      }
     }
 
-    return { success: true, labelId: label.id };
+    // 5. Create the new filter
+    const filterRes = await gmail.users.settings.filters.create({
+      userId: 'me',
+      requestBody: {
+        criteria: {
+          query: query.replace(/\s+/g, ' ').trim(), // Clean up the query string
+        },
+        action: {
+          addLabelIds: [label.id],
+          // Uncomment the next line if you want to auto-archive these emails
+          // removeLabelIds: ['INBOX'],
+        },
+      },
+    });
+
+    console.log('New filter created:', filterRes.data.id);
+    return { 
+      success: true, 
+      labelId: label.id,
+      message: 'Job application filter successfully created/updated'
+    };
   } catch (err) {
     console.error('Error setting up Gmail filter/label:', err);
-    return { success: false, error: err.message };
+    return { 
+      success: false, 
+      error: err.message 
+    };
   }
 }
 

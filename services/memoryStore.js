@@ -64,10 +64,7 @@ async function refreshCacheIfNeeded(userId) {
 }
 
 const GetDataFromBot = async (userId) => {
-  const db = connectDB();
-  if (!db) return [];
-  const rows = await db.all(`SELECT * FROM application_tracking WHERE user_id = ?`, [userId]);
-  return rows;
+  return []
 }
 
 // Clear cache for specific user
@@ -153,10 +150,12 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
   if (!existing) {
     const possibleUpdate = await db.get(`
       SELECT * FROM application_tracking 
-      WHERE fingerprint = ? OR (
-        application_id = ? AND company_name = ? AND job_title = ?
-      )
-    `, [fingerprint, application_id, company_name, job_title]);
+      WHERE (
+        (application_id = ? AND company_name = ?) OR 
+        (fingerprint = ? AND application_id = ?) OR 
+        (job_title = ? AND company_name = ?)
+      ) AND user_id = ?
+    `, [application_id, company_name, fingerprint, application_id, job_title, company_name, userId]);
 
     if (possibleUpdate) {
       possibleUpdates.push({
@@ -168,7 +167,11 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
         emailSnippet: email.body.slice(0, 300)
       });
 
-      //Update the Existing one to this new one
+      await db.run(`
+        UPDATE application_tracking 
+        SET current_status = ?, last_updated = ? 
+        WHERE hash = ?
+      `, [jobStatus, date, possibleUpdate.hash]);
     }
 
     let success = false;
@@ -187,10 +190,11 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
     if (success) {
       await db.run(`
         INSERT INTO application_tracking 
-        (hash, fingerprint, email_address, application_id, company_name, job_title, discord_msg_id, last_status, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (hash, user_id, fingerprint, email_address, application_id, company_name, job_title, discord_msg_id, current_status, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         emailHash,
+        userId,
         fingerprint,
         from,
         application_id,

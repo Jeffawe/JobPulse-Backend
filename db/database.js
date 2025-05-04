@@ -56,7 +56,8 @@ export const initApplicationDB = async () => {
       job_title TEXT,                      
       discord_msg_id TEXT,                 
       current_status TEXT,                    
-      last_updated TEXT                    
+      last_updated TEXT,
+      user_id INTEGER               
     );
   `);
 
