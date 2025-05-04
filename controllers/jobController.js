@@ -1,11 +1,11 @@
-import { addToEmailUpdates } from '../memoryStore.js';
-import { NLPProcessor } from '../nlpProcessor.js';
+import { addManyToEmailUpdates } from '../services/memoryStore.js';
+import { NLPProcessor } from '../services/nlpProcessor.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 import { createClient } from '@supabase/supabase-js';
 import { connectDB } from '../db/database.js';
 import { google } from 'googleapis';
 import { createGmailFilter } from './authController.js';
-import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
+import { cacheUtils } from '../config/cacheConfig.js';
 
 const extractEmailFields = (email) => {
   const headers = email.payload.headers;
@@ -82,32 +82,28 @@ export const pollEmails = async (req, res) => {
     console.log(`Found ${messages.length} emails in the last ${pollIntervalMinutes} minutes`);
 
     // Process each email
-    for (const message of messages) {
-      const emailData = await gmail.users.messages.get({
+    const messagePromises = messages.map(msg =>
+      gmail.users.messages.get({
         userId: 'me',
-        id: message.id,
+        id: msg.id,
         format: 'full'
-      });
-
-      // Process email with NLP to check if it's a job email
-      const { subject, from, body, date } = extractEmailFields(emailData.data);
-
+      })
+    );
+    
+    const messageResponses = await Promise.all(messagePromises);
+  
+    for (const message of messageResponses) {
+      const { subject, from, body, date } = extractEmailFields(message.data);
       const processedEmail = NLPProcessor({ subject, from, body, date });
-
+    
       if (processedEmail.isJobEmail) {
         jobEmails.push(processedEmail);
-
-        // Add to shared queue for frontend updates
-        addToEmailUpdates(processedEmail);
-
-        // Send to appropriate notification channel
-        if (user.discord_webhook) {
-          await sendToDiscord(user.discord_webhook, processedEmail);
-        } else {
-          storageLoc = 'supabase';
-          await saveToSupabase(userId, processedEmail);
-        }
       }
+    }
+    
+    // Process all valid job emails in one go
+    if (jobEmails.length > 0) {
+      await addManyToEmailUpdates(jobEmails, user.id, user.discord_webhook);
     }
 
     return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
@@ -196,6 +192,10 @@ export const migrateOldMessages = async (req, res) => {
 // Function to send email updates to Discord webhook
 export const sendToDiscord = async (webhookUrl, emailData) => {
   try {
+    const urlWithWait = webhookUrl.includes('?')
+      ? `${webhookUrl}&wait=true`
+      : `${webhookUrl}?wait=true`;
+
     const payload = {
       content: null,
       embeds: [
@@ -229,7 +229,7 @@ export const sendToDiscord = async (webhookUrl, emailData) => {
       ]
     };
 
-    const response = await fetch(webhookUrl, {
+    const response = await fetch(urlWithWait, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -238,11 +238,15 @@ export const sendToDiscord = async (webhookUrl, emailData) => {
     });
 
     if (!response.ok) {
-      throw new Error(`Discord webhook failed: ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`Discord webhook failed: ${response.status} - ${errorText}`);
     }
+
+    const data = await response.json();
+    return { success: true, messageId: data.id };
   } catch (error) {
     console.error('Error sending to Discord:', error);
-    throw error;
+    return { success: false, error: error.message };
   }
 };
 
@@ -270,12 +274,13 @@ export const saveToSupabase = async (userId, emailData) => {
       ]);
 
     if (error) {
-      throw error;
+      console.error('Error saving to Supabase:', error);
+      return false
     }
 
     return data;
   } catch (error) {
     console.error('Error saving to Supabase:', error);
-    throw error;
+    return false
   }
 };

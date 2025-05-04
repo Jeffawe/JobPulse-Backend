@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import jobRoutes from './routes/jobRoute.js';
 import authRoutes from './routes/authRoute.js';
 import { verifyApiKey } from './middleware/apikey.js';
-import { initDB } from './db/database.js';
+import { initDB, initApplicationDB } from './db/database.js';
 import { addColumns } from './db/database.js';
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
@@ -43,7 +43,8 @@ app.get('/', (req, res) => {
 
 app.get('/setup', (req, res) => {
     try {
-        initDB();
+        //initDB();
+        initApplicationDB();
         //addColumns()
         res.status(200).json({
             status: 'success',

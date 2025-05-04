@@ -41,6 +41,28 @@ export const initDB = async () => {
   return db;
 };
 
+export const initApplicationDB = async () => {
+  ensureDBFolderExists();
+
+  const db = await connectDB();
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS application_tracking (
+      hash TEXT PRIMARY KEY,               
+      fingerprint TEXT,                    
+      email_address TEXT,                          
+      application_id TEXT,                 
+      company_name TEXT,                   
+      job_title TEXT,                      
+      discord_msg_id TEXT,                 
+      current_status TEXT,                    
+      last_updated TEXT                    
+    );
+  `);
+
+  return db;
+};
+
 export const connectDB = async () => {
   return open({
     filename: dbPath,

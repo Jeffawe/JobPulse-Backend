@@ -6,7 +6,7 @@ import {
   } from '../controllers/pushController.js';
 import { pollEmails, migrateOldMessages } from '../controllers/jobController.js';
 import { authenticateToken } from '../middleware/auth.js';
-import { getEmails } from '../memoryStore.js';
+import { getEmails } from '../services/memoryStore.js';
 
 const router = express.Router();
 
