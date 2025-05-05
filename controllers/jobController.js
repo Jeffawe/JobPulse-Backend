@@ -43,8 +43,11 @@ export const pollEmails = async (req, res) => {
 
     const db = await connectDB();
 
-    // Get user info
-    const user = await db.get('SELECT email, discord_webhook, label_id FROM users WHERE id = ?', [userId]);
+    let user = await cacheUtils.getCache(`userbasic:${userId}`);
+
+    if (!user) {
+      user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE email = ?`, [email]);
+    }
 
     if (!user.label_id) {
       return res.status(400).json({ error: 'No Gmail label configured for this user.' });
@@ -53,7 +56,7 @@ export const pollEmails = async (req, res) => {
     // Get OAuth2 client
     const oauth2Client = await getOAuth2Client(userId);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-    let filterExists = await checkFilterExists();
+    let filterExists = await checkFilterExists(userId, user.label_id);
 
     if (!filterExists) {
       const { success, labelId } = await createGmailFilter(oauth2Client);
@@ -89,21 +92,29 @@ export const pollEmails = async (req, res) => {
         format: 'full'
       })
     );
-    
+
     const messageResponses = await Promise.all(messagePromises);
-  
+
     for (const message of messageResponses) {
       const { subject, from, body, date } = extractEmailFields(message.data);
       const processedEmail = NLPProcessor({ subject, from, body, date });
-    
+
       if (processedEmail.isJobEmail) {
         jobEmails.push(processedEmail);
       }
     }
-    
+
     // Process all valid job emails in one go
     if (jobEmails.length > 0) {
-      await addManyToEmailUpdates(jobEmails, user.id, user.discord_webhook);
+      try {
+        await db.run('BEGIN TRANSACTION');
+        await addManyToEmailUpdates(jobEmails, userId, user.discord_webhook);
+        await db.run('COMMIT');
+      } catch (error) {
+        await db.run('ROLLBACK');
+        console.error('Transaction failed during email processing:', error);
+        throw error; // Re-throw to be caught by the outer catch block
+      }
     }
 
     return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
@@ -113,12 +124,10 @@ export const pollEmails = async (req, res) => {
   }
 };
 
-export const checkFilterExists = async () => {
+export const checkFilterExists = async (userId, labelId) => {
   try {
-    const userId = req.userId;
-
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    if (!userId || !labelId) {
+      return false;
     }
 
     const db = await connectDB();
@@ -128,7 +137,7 @@ export const checkFilterExists = async () => {
     const labelsRes = await gmail.users.labels.list({ userId: 'me' });
     const existingLabelIds = labelsRes.data.labels.map(label => label.id);
 
-    if (!existingLabelIds.includes(user.label_id)) {
+    if (!existingLabelIds.includes(labelId)) {
       // Label was deleted manually — reset label_id in DB/cache
       await db.run(`UPDATE users SET label_id = NULL WHERE id = ?`, [userId]);
       await cacheUtils.deleteCache(`userbasic:${userId}`);
@@ -141,7 +150,7 @@ export const checkFilterExists = async () => {
     console.error('Error checking filter:', error);
     return false;
   }
-}
+};
 
 export const migrateOldMessages = async (req, res) => {
   try {
@@ -153,36 +162,53 @@ export const migrateOldMessages = async (req, res) => {
 
     const db = await connectDB();
 
-    const user = await db.get(`SELECT email, label_id FROM users WHERE id = ?`, [userId]);
+    await db.run('BEGIN TRANSACTION');
+    
+    try {
+      const user = await db.get(`SELECT email, label_id FROM users WHERE id = ?`, [userId]);
 
-    if (!user?.label_id) {
-      return res.status(400).json({ error: 'No label configured for this user.' });
-    }
+      if (!user?.label_id) {
+        await db.run('ROLLBACK');
+        return res.status(400).json({ error: 'No label configured for this user.' });
+      }
 
-    const oauth2Client = await getOAuth2Client(userId);
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+      const oauth2Client = await getOAuth2Client(userId);
+      const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-    const oldMatches = await gmail.users.messages.list({
-      userId: 'me',
-      q: 'subject:(interview OR job OR opportunity)',
-      maxResults: 100,
-    });
+      // Validate the label still exists
+      const filterExists = await checkFilterExists(userId, user.label_id);
+      if (!filterExists) {
+        await db.run('ROLLBACK');
+        return res.status(400).json({ error: 'Label no longer exists. Please reconfigure your Gmail filter.' });
+      }
 
-    const matchedMessages = oldMatches.data.messages || [];
-
-    for (const msg of matchedMessages) {
-      await gmail.users.messages.modify({
+      const oldMatches = await gmail.users.messages.list({
         userId: 'me',
-        id: msg.id,
-        requestBody: {
-          addLabelIds: [user.label_id],
-          removeLabelIds: ['INBOX'], // optional: skip if you want to keep them in Inbox too
-        },
+        q: 'subject:(interview OR job OR opportunity)',
+        maxResults: 100,
       });
+
+      const matchedMessages = oldMatches.data.messages || [];
+      
+      await db.run('COMMIT');
+
+      // Process messages (this doesn't need to be in the transaction)
+      for (const msg of matchedMessages) {
+        gmail.users.messages.modify({
+          userId: 'me',
+          id: msg.id,
+          requestBody: {
+            addLabelIds: [user.label_id],
+            removeLabelIds: ['INBOX'], // optional: skip if you want to keep them in Inbox too
+          },
+        });
+      }
+
+      return res.status(200).json({ success: true, moved: matchedMessages.length });
+    } catch (error) {
+      await db.run('ROLLBACK');
+      throw error;
     }
-
-    return res.status(200).json({ success: true, moved: matchedMessages.length });
-
   } catch (error) {
     console.error('Error migrating messages:', error);
     return res.status(500).json({ error: 'Failed to migrate old messages' });
@@ -192,6 +218,11 @@ export const migrateOldMessages = async (req, res) => {
 
 // Function to send email updates to Discord webhook
 export const sendToDiscord = async (webhookUrl, emailData) => {
+  if (!webhookUrl || !webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
+    console.error('Invalid Discord webhook URL');
+    return { success: false, error: 'Invalid webhook URL' };
+  }
+
   try {
     const urlWithWait = webhookUrl.includes('?')
       ? `${webhookUrl}&wait=true`
@@ -253,6 +284,16 @@ export const sendToDiscord = async (webhookUrl, emailData) => {
 
 
 export const saveToSupabase = async (userId, emailData) => {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+    console.error('Supabase credentials not configured');
+    return false;
+  }
+  
+  if (!userId || !emailData) {
+    console.error('Missing required parameters for Supabase save');
+    return false;
+  }
+
   try {
     const supabase = createClient(
       process.env.SUPABASE_URL,

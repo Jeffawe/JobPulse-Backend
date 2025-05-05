@@ -7,7 +7,7 @@ const router = express.Router();
 router.post('/google', authController.googleAuth);
 router.post('/create-filter', authenticateToken, authController.createGmailFilterEndPoint);
 router.get('/verify', authenticateToken, authController.verify);
-router.delete('/delete/:userId', authenticateToken,authController.deleteAccount);
+router.delete('/delete/:userId', authenticateToken, authController.deleteAccount);
 router.patch('/update', authenticateToken, UpdateUserNotifications);
 
 export default router;
