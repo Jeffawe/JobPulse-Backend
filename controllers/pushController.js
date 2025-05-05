@@ -139,7 +139,7 @@ export const refreshGmailWatch = async (userId) => {
     const db = await connectDB();
 
     // Get user watch expiration
-    const user = await db.get('SELECT gmail_watch_expiration FROM users WHERE id = ?', [userId]);
+    const user = await db.get('SELECT gmail_watch_expiration, label_id FROM users WHERE id = ?', [userId]);
 
     if (!user || !user.gmail_watch_expiration) {
       return false;
@@ -156,11 +156,11 @@ export const refreshGmailWatch = async (userId) => {
 
       const topicName = `projects/${process.env.GOOGLE_CLOUD_PROJECT_ID}/topics/${process.env.PUBSUB_TOPIC_NAME}`;
 
-      const response = await gmail.users.watch({
+      const response = gmail.users.watch({
         userId: 'me',
         requestBody: {
           topicName,
-          labelIds: ['INBOX'],
+          labelIds: [user.label_id],
           labelFilterAction: 'include',
           labelFilterBehavior: 'exactMatch',
           userId: 'me'

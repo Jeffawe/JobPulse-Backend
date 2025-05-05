@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import crypto from 'crypto';
-import { sendToDiscord, saveToSupabase } from '../controllers/jobController';
-import { connectDB } from '../db/database';
+import { sendToDiscord, saveToSupabase } from '../controllers/jobController.js';
+import { connectDB } from '../db/database.js';
 
 const possibleUpdates = [];
 
@@ -13,6 +13,7 @@ const emailUpdatesStore = {
   // Add a timestamp for when the cache was last refreshed from permanent storage
   lastRefreshed: null
 };
+
 // Cache expiration time in milliseconds (e.g., 30 minutes)
 const CACHE_EXPIRATION = 30 * 60 * 1000;
 
@@ -27,7 +28,7 @@ export const initializeSocketServer = (server) => {
       await refreshCacheIfNeeded(userId);
 
       // Send cached data to the newly connected user
-      const userEmails = getEmailUpdates(userId);
+      const userEmails = getEmailsFromCache(userId);
       socket.emit('initialEmails', userEmails);
 
       socket.on('disconnect', () => {
@@ -37,6 +38,27 @@ export const initializeSocketServer = (server) => {
   });
 };
 
+function getEmailsFromCache(userId) {
+  const latestEmailByFingerprint = new Map();
+
+  for (let i = emailUpdatesStore.queue.length - 1; i >= 0; i--) {
+    const email = emailUpdatesStore.queue[i];
+    if (email.metadata?.userId === userId) {
+      // Only process entries with both job_title and company_name
+      if (email.job_title && email.company_name) {
+        const fingerprint = generateFingerprint(email.job_title, email.company_name);
+
+        // Only keep the latest email for each job application
+        if (!latestEmailByFingerprint.has(fingerprint)) {
+          latestEmailByFingerprint.set(fingerprint, email);
+        }
+      }
+    }
+  }
+
+  return Array.from(latestEmailByFingerprint.values());
+}
+
 // Function to check if cache needs refreshing and do so if needed
 async function refreshCacheIfNeeded(userId) {
   const now = Date.now();
@@ -44,21 +66,41 @@ async function refreshCacheIfNeeded(userId) {
     (now - emailUpdatesStore.lastRefreshed) > CACHE_EXPIRATION;
 
   if (needsRefresh) {
-    try {
-      // Clear existing cache for this user
-      clearUserCache(userId);
+    let retries = 0;
+    const MAX_RETRIES = 3;
 
-      // Fetch fresh data from permanent storage
-      const freshData = await GetDataFromBot(userId);
+    while (retries < MAX_RETRIES) {
+      try {
+        // Clear existing cache for this user
+        clearUserCache(userId);
 
-      // Add fresh data to cache with 'storage' source
-      freshData.forEach(email => {
-        addToEmailUpdates(email, userId, null);
-      });
+        // Fetch fresh data from permanent storage
+        const freshData = await GetDataFromBot(userId);
 
-      emailUpdatesStore.lastRefreshed = now;
-    } catch (error) {
-      console.error('Failed to refresh cache from permanent storage:', error);
+        if (!Array.isArray(freshData)) {
+          throw new Error('GetDataFromBot did not return an array');
+        }
+
+        const user = await db.get(
+          `SELECT discord_webhook FROM users WHERE id = ?`,
+          [userId]
+        );
+
+        await addManyToEmailUpdates(freshData, userId, user?.discord_webhook);
+
+        emailUpdatesStore.lastRefreshed = now;
+        break; // Success, exit retry loop
+      } catch (error) {
+        retries++;
+        console.error(`Failed to refresh cache from storage (attempt ${retries}):`, error);
+
+        if (retries >= MAX_RETRIES) {
+          console.error('Max retries reached for cache refresh');
+        } else {
+          // Wait before retrying (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, retries)));
+        }
+      }
     }
   }
 }
@@ -99,27 +141,52 @@ function generateFingerprint(jobTitle, companyName) {
 
 export const addManyToEmailUpdates = async (emails, userId, discord_webhook) => {
   const updatedEmails = [];
+  const processedEmailIds = new Set();
 
-  for (const email of emails) {
-    const added = await addToEmailUpdates(email, userId, discord_webhook);
-    if (added) updatedEmails.push(email);
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < emails.length; i += BATCH_SIZE) {
+    const batch = emails.slice(i, i + BATCH_SIZE);
+
+    for (const email of batch) {
+      // Generate a hash to identify this email if no ID exists
+      if (!email.id) {
+        const emailHash = hashContent(email.body);
+        email.id = `email-${emailHash.substring(0, 8)}`;
+      }
+
+      // Skip if we've already processed this email in this batch
+      if (processedEmailIds.has(email.id)) continue;
+
+      const added = await addToEmailUpdates(email, userId, discord_webhook);
+      if (added) {
+        updatedEmails.push(email);
+        processedEmailIds.add(email.id);
+      }
+    }
   }
 
-  // Batch WebSocket emit
-  if (updatedEmails.length && emailUpdatesStore.connections.has(userId)) {
+  // Send batch update to client socket if any were added
+  if (updatedEmails.length > 0 && emailUpdatesStore.connections.has(userId)) {
     const socket = emailUpdatesStore.connections.get(userId);
     socket.emit('newEmails', updatedEmails);
   }
 
+  // Process any updates to existing records in Discord
   if (possibleUpdates.length > 0) {
-    await fetch(`${process.env.BOT_URL}/updateMessages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.BOT_SECRET}`
-      },
-      body: JSON.stringify(possibleUpdates)
-    });
+    try {
+      await fetch(`${process.env.BOT_URL}/updateMessages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.BOT_SECRET}`
+        },
+        body: JSON.stringify(possibleUpdates)
+      });
+      // Clear the updates after processing
+      possibleUpdates.length = 0;
+    } catch (error) {
+      console.error('Failed to update Discord messages:', error);
+    }
   }
 
   return updatedEmails.length;
@@ -136,18 +203,35 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
     date
   } = email;
 
+  // Generate identifiers first
   const emailHash = hashContent(body);
   const fingerprint = generateFingerprint(job_title, company_name);
+
+  // Generate a consistent ID for this email if not provided
+  const emailId = email.id || `email-${emailHash.substring(0, 8)}`;
+
+  if (emailUpdatesStore.emailsById.has(emailId)) {
+    return false;
+  }
 
   const db = connectDB();
   if (!db) return false;
 
-  const existing = await db.get(
-    `SELECT * FROM application_tracking WHERE hash = ?`,
-    [emailHash]
-  );
+  try {
+    // Use transaction for database consistency
+    await db.run('BEGIN TRANSACTION');
 
-  if (!existing) {
+    // Check if this exact email exists
+    const existing = await db.get(
+      `SELECT * FROM application_tracking WHERE hash = ?`,
+      [emailHash]
+    );
+
+    if (existing) {
+      await db.run('COMMIT');
+      return false; // Email already exists
+    }
+
     const possibleUpdate = await db.get(`
       SELECT * FROM application_tracking 
       WHERE (
@@ -157,72 +241,96 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
       ) AND user_id = ?
     `, [application_id, company_name, fingerprint, application_id, job_title, company_name, userId]);
 
-    if (possibleUpdate) {
-      possibleUpdates.push({
-        discord_msg_id: possibleUpdate.discord_msg_id,
-        discord_webhook: discord_webhook,
-        newStatus: jobStatus,
-        jobTitle: job_title,
-        companyName: company_name,
-        emailSnippet: email.body.slice(0, 300)
-      });
-
-      await db.run(`
-        UPDATE application_tracking 
-        SET current_status = ?, last_updated = ? 
-        WHERE hash = ?
-      `, [jobStatus, date, possibleUpdate.hash]);
-    }
-
     let success = false;
     let discord_id = possibleUpdate?.discord_msg_id ?? null;
 
-    if (discord_webhook && discord_webhook !== "NULL") {
-      const result = await sendToDiscord(discord_webhook, email);
-      if (result.success) {
-        success = true;
-        discord_id = result.messageId;
-      }
+    if (possibleUpdate) {
+      success = true;
     } else {
-      success = await saveToSupabase(userId, email);
+      // Handle external storage (Discord or Supabase)
+      if (discord_webhook && discord_webhook !== "NULL") {
+        const result = await sendToDiscord(discord_webhook, email);
+        if (result.success) {
+          success = true;
+          discord_id = result.messageId;
+        }
+      } else {
+        success = await saveToSupabase(userId, email);
+      }
     }
 
     if (success) {
-      await db.run(`
+      // If this is an update to an existing application
+      if (possibleUpdate) {
+        possibleUpdates.push({
+          discord_msg_id: possibleUpdate.discord_msg_id,
+          discord_webhook: discord_webhook,
+          newStatus: jobStatus,
+          jobTitle: job_title,
+          companyName: company_name,
+          emailSnippet: body.slice(0, 300)
+        });
+
+        await db.run(`
+          UPDATE application_tracking 
+          SET current_status = ?, last_updated = ? 
+          WHERE hash = ?
+        `, [jobStatus, date, possibleUpdate.hash]);
+      } else {
+        // Insert the new email record
+        await db.run(`
         INSERT INTO application_tracking 
         (hash, user_id, fingerprint, email_address, application_id, company_name, job_title, discord_msg_id, current_status, last_updated)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
-        emailHash,
-        userId,
-        fingerprint,
-        from,
-        application_id,
-        company_name,
-        job_title,
-        discord_id,
-        jobStatus,
-        date
-      ]);
+          emailHash,
+          userId,
+          fingerprint,
+          from,
+          application_id,
+          company_name,
+          job_title,
+          discord_id,
+          jobStatus,
+          date
+        ]);
+      }
 
-      const emailId = email.id || `email-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      // Add to memory cache with appropriate metadata
       email.id = emailId;
       email.metadata = {
         receivedAt: new Date().toISOString(),
         source: possibleUpdate ? 'update' : 'new',
-        storageLocation: 'memory',
+        storageLocation: 'database',
         userId
       };
 
-      if (!emailUpdatesStore.emailsById.has(emailId)) {
-        emailUpdatesStore.emailsById.set(emailId, email);
-        emailUpdatesStore.queue.push(email);
-        return true;
-      }
-    }
-  }
+      // Update in-memory storage
+      emailUpdatesStore.emailsById.set(emailId, email);
 
-  return false;
+      // Only keep a reasonable number of items in the queue (e.g., latest 1000)
+      const MAX_QUEUE_SIZE = 1000;
+      if (emailUpdatesStore.queue.length >= MAX_QUEUE_SIZE) {
+        const oldestEmail = emailUpdatesStore.queue.shift();
+        // Remove from Map if it's not referenced elsewhere
+        if (oldestEmail && oldestEmail.id) {
+          emailUpdatesStore.emailsById.delete(oldestEmail.id);
+        }
+      }
+
+      emailUpdatesStore.queue.push(email);
+
+      await db.run('COMMIT');
+      return true;
+    } else {
+      await db.run('ROLLBACK');
+      return false;
+    }
+  } catch (error) {
+    await db.run('ROLLBACK');
+    console.error('Error in addToEmailUpdates:', error);
+    return false;
+  }
 };
 
 
@@ -238,6 +346,6 @@ export const getEmails = async (req, res) => {
     await refreshCacheIfNeeded(userId);
   }
 
-  const emails = getEmailUpdates(userId);
+  const emails = getEmailsFromCache(userId);
   res.json({ success: true, emails });
 };

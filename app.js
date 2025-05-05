@@ -21,8 +21,18 @@ app.use(helmet());
 const limiter = rateLimit({
     windowMs: 30 * 60 * 1000, // 30 minutes
     max: 100, // Limit each IP to 100 requests per windowMs
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    message: 'Too many requests from this IP, please try again later'
 });
+
 app.use(limiter);
+
+app.use('/api/job/google', rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 5, // 5 attempts per hour
+    message: 'Too many login attempts, please try again later'
+}));
 
 app.use(cors({
     origin: '*',
@@ -43,7 +53,7 @@ app.get('/', (req, res) => {
 
 app.get('/setup', (req, res) => {
     try {
-        //initDB();
+        initDB();
         initApplicationDB();
         //addColumns()
         res.status(200).json({
@@ -64,7 +74,7 @@ app.get('/health', (req, res) => {
 });
 
 //app.use('/api/jobs', jobRoutes);
-app.use('/api/auth', authRoutes);
-app.use('/api/job', jobRoutes);
+app.use('/api/auth', verifyApiKey, authRoutes);
+app.use('/api/job', verifyApiKey, jobRoutes);
 
 export default app;

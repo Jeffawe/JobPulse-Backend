@@ -13,6 +13,7 @@ dist-ssr
 *.local
 /db/database.sqlite
 nlpProcessor.js
+encryption.js
 
 # Editor directories and files
 .vscode/*

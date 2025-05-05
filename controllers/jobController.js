@@ -139,6 +139,7 @@ export const checkFilterExists = async () => {
     return true;
   } catch (error) {
     console.error('Error checking filter:', error);
+    return false;
   }
 }
 
