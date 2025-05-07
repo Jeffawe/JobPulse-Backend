@@ -444,7 +444,11 @@ export const createGmailFilter = async (oauth2Client) => {
              "interview request" OR "schedule an interview" OR "job offer" OR "position update" OR
              "next steps" OR "assessment invitation" OR "hiring process" OR "thanks for applying" OR
              "we're reviewing your application" OR "application submission" OR "phone screen" OR
-             "technical interview" OR "onsite interview" OR "job application" OR "your candidacy"))
+             "technical interview" OR "onsite interview" OR "job application" OR "your candidacy" OR
+             "thank you for applying" OR "not to move forward" OR "not moving forward" OR
+             "not proceed" OR "other candidates" OR "decided to proceed" OR "no longer under consideration" OR
+             "pursue other candidates" OR "application unsuccessful" OR "won't be progressing" OR
+             "not selected" OR "not a match" OR "opportunity to inform you"))
     OR
     (from:(jobs-noreply@linkedin.com OR careers@linkedin.com OR *@indeedemail.com OR 
            *@bounce.jobvite.com OR *@notifications.lever.co OR *@greenhouse.io OR
@@ -455,6 +459,7 @@ export const createGmailFilter = async (oauth2Client) => {
            *@app.jazz.co OR noreply@hired.com OR *@indeed.com OR *@ziprecruiter.com OR
            *@monster.com OR *@careerbuilder.com OR *@dice.com OR *@wellfound.com OR
            *@talent.com OR *@angel.co OR *@remoteco.com OR *@simplyhired.com OR
+           *@myworkday.com OR talentmanagementsolution@myworkday.com OR
            jobs@greenhouse.io OR talent@*) 
      -subject:("who's viewed" OR "weekly" OR "digest" OR "network" OR "profile views" OR "trending" OR
               "updates" OR "news" OR "newsletter" OR "subscription"))
@@ -501,7 +506,7 @@ export const createGmailFilter = async (oauth2Client) => {
     if (existingFilters.length > 0) {
       console.log(`Removing ${existingFilters.length} existing filters for this label`);
       for (const filter of existingFilters) {
-        gmail.users.settings.filters.delete({
+        await gmail.users.settings.filters.delete({
           userId: 'me',
           id: filter.id
         });
@@ -510,16 +515,14 @@ export const createGmailFilter = async (oauth2Client) => {
     }
 
     // 5. Create the new filter
-    const filterRes = gmail.users.settings.filters.create({
+    const filterRes = await gmail.users.settings.filters.create({
       userId: 'me',
       requestBody: {
         criteria: {
           query: query.replace(/\s+/g, ' ').trim(), // Clean up the query string
         },
         action: {
-          addLabelIds: [label.id],
-          // Uncomment the next line if you want to auto-archive these emails
-          // removeLabelIds: ['INBOX'],
+          addLabelIds: [label.id]
         },
       },
     });
