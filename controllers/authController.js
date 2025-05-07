@@ -8,14 +8,39 @@ import { encryptMultipleFields, decryptMultipleFields } from '../services/encryp
 
 dotenv.config();
 
+const generateRandomString = (length) => {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return result;
+}
+
 export const authController = {
   async googleAuth(req, res) {
     try {
-      const { token } = req.body;
+      const { token, is_test_user } = req.body;
 
       if (!token) throw new Error("No code provided");
 
       const oauth2Client = getOAuth2ClientBasic();
+
+      const db = await connectDB();
+
+      if (is_test_user) {
+        const testUser = await this.generateTestUser(db);
+
+        const testJwtToken = jwt.sign(
+          { userId: testUser.id, is_test_user: true },
+          process.env.JWT_SECRET,
+          { expiresIn: '1d' }
+        );
+
+        await cacheUtils.setCache(`testUser${testUser.id}`, testUser, CACHE_DURATIONS.USER_PROFILE);
+
+        res.json({ token: testJwtToken, user: testUser, firstTime: true });
+      }
 
       // Exchange code for tokens
       const { tokens } = await oauth2Client.getToken({
@@ -40,15 +65,13 @@ export const authController = {
 
       const { data: userData } = await oauth2.userinfo.get();
 
-      const db = await connectDB();
-
 
       // Check if user exists
       let user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
 
       const { iv, encryptedData, authTag } = encryptMultipleFields({
         refresh_token,
-        discord_webhook: null
+        discord_webhook: null,
       });
 
       if (!user) {
@@ -65,8 +88,9 @@ export const authController = {
             credentials_iv,
             credentials_auth_tag,
             discord_webhook,
-            label_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            label_id,
+            isTestUser
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             userData.email,
             userData.name,
@@ -74,11 +98,24 @@ export const authController = {
             iv,
             authTag,
             false,
-            label
+            label,
+            false
           ]
         );
 
         user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
+
+        const encryptedCachePayload = {
+          credentials_encrypted_data: encryptedData,
+          credentials_iv: iv,
+          credentials_auth_tag: authTag,
+        };
+
+        await cacheUtils.setCache(
+          `data:${user.id}`,
+          encryptedCachePayload,
+          CACHE_DURATIONS.OTHER
+        );
       } else {
         firstTime = false;
 
@@ -118,6 +155,18 @@ export const authController = {
               userData.email
             ]
           );
+
+          const encryptedCachePayload = {
+            credentials_encrypted_data: encryptedData,
+            credentials_iv: iv,
+            credentials_auth_tag: authTag,
+          };
+
+          await cacheUtils.setCache(
+            `data:${user.id}`,
+            encryptedCachePayload,
+            CACHE_DURATIONS.OTHER
+          );
         }
       }
 
@@ -130,12 +179,13 @@ export const authController = {
         notification_value: user.notification_value,
         notification_status: user.notification_status,
         email_addresses: user.email_addresses,
-        label_id: user.label_id
+        label_id: user.label_id,
+        isTestUser: user.isTestUser
       };
 
       // Create JWT
       const jwtToken = jwt.sign(
-        { userId: user.id },
+        { userId: user.id, is_test_user: false },
         process.env.JWT_SECRET,
         { expiresIn: '7d' }
       );
@@ -150,9 +200,66 @@ export const authController = {
     }
   },
 
+  async generateTestUser(db) {
+    try {
+      const testEmail = `demo-${uuidv4().substring(0, 8)}@testing.com`;
+      let testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
+
+      if (!testUser) {
+        // Generate secure but fake credentials
+        const fakeCredentials = {
+          refresh_token: `test_${generateRandomString(30)}`,
+          discord_webhook: 'test_discord_webhook'
+        };
+
+        // Encrypt the fake credentials
+        const { testencryptedData, testiv, testauthTag } = encryptMultipleFields(fakeCredentials);
+
+        await db.run(
+          `INSERT INTO users (
+          email,
+          name,
+          credentials_encrypted_data,
+          credentials_iv,
+          credentials_auth_tag,
+          discord_webhook,
+          label_id,
+          isTestUser
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            testEmail,
+            'Test User',
+            testencryptedData,
+            testiv,
+            testauthTag,
+            false,
+            null,
+            true
+          ]
+        );
+
+        testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
+      }
+
+      if (!testUser) {
+        throw new Error("Failed to create test user");
+      }
+
+      return testUser;
+    } catch (e) {
+      console.log(e);
+      throw new Error("Failed to create test user");
+    }
+  },
+
   async createGmailFilterEndPoint(req, res) {
     try {
       const userId = req.userId;
+      const testUser = req.testUser;
+
+      if (testUser) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
 
       if (!userId) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -164,7 +271,7 @@ export const authController = {
 
       if (!cachedUser) {
         cachedUser = await db.get(`
-          SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id
+          SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser
           FROM users
           WHERE id = ?
         `, [userId]);
@@ -174,10 +281,14 @@ export const authController = {
         }
       }
 
-      const tokenRow = await db.get(
-        `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
-        [userId]
-      );
+      let tokenRow = await cacheUtils.getCache(`data:${userId}`);
+
+      if (!tokenRow) {
+        tokenRow = await db.get(
+          `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+          [userId]
+        );
+      }
 
       if (!tokenRow) throw new Error("User not found");
 
@@ -213,15 +324,21 @@ export const authController = {
   async verify(req, res) {
     try {
       const userId = req.userId;
+      const testUser = req.testUser;
 
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
-      const cachedUser = await cacheUtils.getCache(`userbasic:${userId}`);
+
+      const cacheKey = `userbasic:${userId}`;
+      if (testUser) {
+        cacheKey = `testUser${userId}`
+      }
+      const cachedUser = await cacheUtils.getCache(cacheKey);
 
       if (cachedUser) return res.json(cachedUser);
 
       const db = await connectDB();
       const user = await db.get(`
-        SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id
+        SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser
         FROM users
         WHERE id = ?
       `, [userId]);
@@ -250,42 +367,48 @@ export const authController = {
     await db.run('BEGIN TRANSACTION');
 
     try {
-      // Get encrypted credentials
-      const user = await db.get(
-        `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
-        [userId]
-      );
+      let user = await cacheUtils.getCache(`data:${userId}`);
+
+      if (!user) {
+        // Get encrypted credentials
+        user = await db.get(
+          `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+          [userId]
+        );
+      }
 
       if (!user) {
         await db.run('ROLLBACK');
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Revoke Google token
-      let revokeAccess = false;
-      try {
-        const { refresh_token } = decryptMultipleFields(
-          user.credentials_encrypted_data,
-          user.credentials_iv,
-          user.credentials_auth_tag
-        );
+      if (!req.testUser) {
+        // Revoke Google token
+        let revokeAccess = false;
+        try {
+          const { refresh_token } = decryptMultipleFields(
+            user.credentials_encrypted_data,
+            user.credentials_iv,
+            user.credentials_auth_tag
+          );
 
-        if (refresh_token) {
-          const response = await fetch('https://oauth2.googleapis.com/revoke', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `token=${refresh_token}`
-          });
+          if (refresh_token) {
+            const response = await fetch('https://oauth2.googleapis.com/revoke', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: `token=${refresh_token}`
+            });
 
-          revokeAccess = response.ok;
-          if (!revokeAccess) {
-            console.warn('Failed to revoke Google token: Non-200 response');
+            revokeAccess = response.ok;
+            if (!revokeAccess) {
+              console.warn('Failed to revoke Google token: Non-200 response');
+            }
           }
+        } catch (err) {
+          console.warn('Failed to decrypt and revoke refresh token:', err);
         }
-      } catch (err) {
-        console.warn('Failed to decrypt and revoke refresh token:', err);
       }
 
       // Delete user and related records
@@ -299,6 +422,7 @@ export const authController = {
 
       await db.run('COMMIT');
       await cacheUtils.deleteCache(`userbasic:${userId}`);
+      await cacheUtils.deleteCache(`testUser${userId}`);
 
       res.status(200).json({ message: 'Account deleted and access revoked', revokeAccess });
 
@@ -386,7 +510,7 @@ export const createGmailFilter = async (oauth2Client) => {
     }
 
     // 5. Create the new filter
-    const filterRes = await gmail.users.settings.filters.create({
+    const filterRes = gmail.users.settings.filters.create({
       userId: 'me',
       requestBody: {
         criteria: {
@@ -438,7 +562,7 @@ export const UpdateUserNotifications = async (req, res) => {
     try {
       const user = await db.get(
         `SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, 
-                credentials_encrypted_data, credentials_iv, credentials_auth_tag, discord_webhook
+                isTestUser, credentials_encrypted_data, credentials_iv, credentials_auth_tag, discord_webhook
          FROM users WHERE id = ?`,
         [userId]
       );
@@ -495,13 +619,22 @@ export const UpdateUserNotifications = async (req, res) => {
         ]
       );
 
-      cacheUtils.setCache(`discord_webhook:${userId}`, updatedWebhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
-      
+      const encryptedCachePayload = {
+        credentials_encrypted_data: encryptedData,
+        credentials_iv: iv,
+        credentials_auth_tag: authTag,
+      };
+
+      await Promise.all([
+        cacheUtils.setCache(`data:${userId}`, encryptedCachePayload, CACHE_DURATIONS.OTHER),
+        cacheUtils.setCache(`discord_webhook:${userId}`, updatedWebhook, CACHE_DURATIONS.DISCORD_WEBHOOK),
+      ]);
+
       // Commit changes
       await db.run('COMMIT');
 
       // Get the updated user from DB
-      const updatedUser = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE email = ?`, [email]);
+      const updatedUser = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser FROM users WHERE email = ?`, [email]);
 
       await cacheUtils.deleteCache(`userbasic:${userId}`);
 

@@ -1,6 +1,8 @@
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
 import { connectDB } from '../db/database.js';
+import { decryptMultipleFields } from './encryption.js';
+import { cacheUtils } from '../config/cacheConfig.js';
 
 dotenv.config();
 
@@ -17,11 +19,27 @@ export const getOAuth2ClientBasic = () => {
 export const getOAuth2Client = async (userId) => {
   const db = await connectDB();
 
-  // Get user refresh token from database
-  const user = await db.get('SELECT refresh_token FROM users WHERE id = ?', [userId]);
+  let user = await cacheUtils.getCache(`data:${userId}`);
 
-  if (!user || !user.refresh_token) {
-    throw new Error('User not found or missing refresh token');
+  if (!user) {
+    user = await db.get(
+      `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+      [userId]
+    );
+  }
+
+  if (!user) {
+    throw new Error('User not found');
+  }
+
+  const { refresh_token } = decryptMultipleFields(
+    user.credentials_encrypted_data,
+    user.credentials_iv,
+    user.credentials_auth_tag
+  );
+
+  if (!refresh_token) {
+    throw new Error('Missing refresh token');
   }
 
   const oauth2Client = new google.auth.OAuth2(

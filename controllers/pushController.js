@@ -10,7 +10,11 @@ import { encryptMultipleFields, decryptMultipleFields } from '../services/encryp
 // Setup Gmail push notifications for a user
 export const setupGmailPushNotifications = async (req, res) => {
   try {
-    const { userId } = req;
+    const { userId, testUser } = req;
+
+    if (testUser) {
+      return res.status(200).end();
+    }
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -122,7 +126,7 @@ export const handleGmailPushNotification = async (req, res) => {
     await db.run('BEGIN TRANSACTION');
 
     try {
-      const user = await db.get('SELECT id, gmail_history_id, discord_webhook, label_id FROM users WHERE email = ?', [emailAddress]);
+      const user = await db.get('SELECT id, gmail_history_id, label_id, isTestUser FROM users WHERE email = ?', [emailAddress]);
 
       if (!user) {
         console.log(`No user found for email: ${emailAddress}`);
@@ -130,7 +134,12 @@ export const handleGmailPushNotification = async (req, res) => {
         return res.status(200).end();
       }
 
-      let webhook = cacheUtils.getCache(`discord_webhook:${user.id}`);
+      if(user.isTestUser) {
+        await db.run('ROLLBACK');
+        return res.status(200).end();
+      }
+
+      let webhook = await cacheUtils.getCache(`discord_webhook:${user.id}`);
 
       if (!webhook) {
         const activeuser = await db.get(
@@ -147,7 +156,7 @@ export const handleGmailPushNotification = async (req, res) => {
         );
 
         webhook = discord_webhook;
-        cacheUtils.setCache(`discord_webhook:${user.id}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
+        await cacheUtils.setCache(`discord_webhook:${user.id}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
       }
 
       const oauth2Client = await getOAuth2Client(user.id);

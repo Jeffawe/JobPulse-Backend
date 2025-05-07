@@ -2,6 +2,8 @@ import { Server } from 'socket.io';
 import crypto from 'crypto';
 import { sendToDiscord, saveToSupabase } from '../controllers/jobController.js';
 import { connectDB } from '../db/database.js';
+import { getTestUserEmails } from './testUserEmail.js';
+import { cacheUtils } from '../config/cacheConfig.js';
 
 const possibleUpdates = [];
 
@@ -74,19 +76,32 @@ async function refreshCacheIfNeeded(userId) {
         // Clear existing cache for this user
         clearUserCache(userId);
 
+        let webhook = await cacheUtils.getCache(`discord_webhook:${userId}`)
+
+        if (!webhook) {
+
+          const user = await db.get(
+            `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag, isTestUser FROM users WHERE id = ?`,
+            [userId]
+          );
+
+          const { discord_webhook } = decryptMultipleFields(
+            user.credentials_encrypted_data,
+            user.credentials_iv,
+            user.credentials_auth_tag
+          );
+
+          webhook = discord_webhook
+        }
+
         // Fetch fresh data from permanent storage
-        const freshData = await GetDataFromBot(userId);
+        const freshData = await GetDataFromBot(userId, user.isTestUser);
 
         if (!Array.isArray(freshData)) {
           throw new Error('GetDataFromBot did not return an array');
         }
 
-        const user = await db.get(
-          `SELECT discord_webhook FROM users WHERE id = ?`,
-          [userId]
-        );
-
-        await addManyToEmailUpdates(freshData, userId, user?.discord_webhook);
+        await addManyToEmailUpdates(freshData, userId, webhook, user.isTestUser);
 
         emailUpdatesStore.lastRefreshed = now;
         break; // Success, exit retry loop
@@ -105,7 +120,11 @@ async function refreshCacheIfNeeded(userId) {
   }
 }
 
-const GetDataFromBot = async (userId) => {
+const GetDataFromBot = async (userId, isTestUser) => {
+  if (isTestUser) {
+    return await getTestUserEmails(userId);
+  }
+
   return []
 }
 
@@ -139,7 +158,7 @@ function generateFingerprint(jobTitle, companyName) {
   return hashContent(base);
 }
 
-export const addManyToEmailUpdates = async (emails, userId, discord_webhook) => {
+export const addManyToEmailUpdates = async (emails, userId, discord_webhook, isTestUser = false) => {
   const updatedEmails = [];
   const processedEmailIds = new Set();
 
@@ -157,7 +176,7 @@ export const addManyToEmailUpdates = async (emails, userId, discord_webhook) => 
       // Skip if we've already processed this email in this batch
       if (processedEmailIds.has(email.id)) continue;
 
-      const added = await addToEmailUpdates(email, userId, discord_webhook);
+      const added = await addToEmailUpdates(email, userId, discord_webhook, isTestUser);
       if (added) {
         updatedEmails.push(email);
         processedEmailIds.add(email.id);
@@ -192,7 +211,7 @@ export const addManyToEmailUpdates = async (emails, userId, discord_webhook) => 
   return updatedEmails.length;
 };
 
-export const addToEmailUpdates = async (email, userId, discord_webhook) => {
+export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUser = false) => {
   const {
     body,
     from,
@@ -212,6 +231,38 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
 
   if (emailUpdatesStore.emailsById.has(emailId)) {
     return false;
+  }
+
+  if (isTestUser) {
+    try {
+      email.id = emailId;
+      email.metadata = {
+        receivedAt: new Date().toISOString(),
+        source: 'new',
+        storageLocation: 'storage',
+        userId
+      };
+
+      // Update in-memory storage
+      emailUpdatesStore.emailsById.set(emailId, email);
+
+      // Only keep a reasonable number of items in the queue (e.g., latest 1000)
+      const MAX_QUEUE_SIZE = 1000;
+      if (emailUpdatesStore.queue.length >= MAX_QUEUE_SIZE) {
+        const oldestEmail = emailUpdatesStore.queue.shift();
+        // Remove from Map if it's not referenced elsewhere
+        if (oldestEmail && oldestEmail.id) {
+          emailUpdatesStore.emailsById.delete(oldestEmail.id);
+        }
+      }
+
+      emailUpdatesStore.queue.push(email);
+      return true
+    }
+    catch (error) {
+      console.error('Failed to add email to memory store:', error);
+      return false;
+    }
   }
 
   const db = connectDB();
@@ -254,6 +305,7 @@ export const addToEmailUpdates = async (email, userId, discord_webhook) => {
           success = true;
           discord_id = result.messageId;
         }
+
       } else {
         success = await saveToSupabase(userId, email);
       }

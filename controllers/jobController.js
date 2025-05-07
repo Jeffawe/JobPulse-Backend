@@ -6,6 +6,7 @@ import { connectDB } from '../db/database.js';
 import { google } from 'googleapis';
 import { createGmailFilter } from './authController.js';
 import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
+import { getTestUserEmails } from '../services/testUserEmail.js';
 
 const extractEmailFields = (email) => {
   const headers = email.payload.headers;
@@ -34,11 +35,44 @@ const extractEmailFields = (email) => {
 
 export const pollEmails = async (req, res) => {
   try {
-    const { userId } = req;
+    const { userId, testUser } = req;
     let storageLoc = 'discord';
+    const jobEmails = [];
 
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    if (testUser) {
+      const emails = await getTestUserEmails(userId);
+
+      try {
+        for (const email of emails) {
+          const { subject, from, body, date } = extractEmailFields(email);
+          const processedEmail = NLPProcessor({ subject, from, body, date });
+
+          if (processedEmail.isJobEmail) {
+            jobEmails.push(processedEmail);
+          }
+        }
+
+        if (jobEmails.length > 0) {
+          try {
+            await db.run('BEGIN TRANSACTION');
+            await addManyToEmailUpdates(jobEmails, userId, webhook, true);
+            await db.run('COMMIT');
+          } catch (error) {
+            await db.run('ROLLBACK');
+            console.error('Transaction failed during email processing:', error);
+            throw error; // Re-throw to be caught by the outer catch block
+          }
+        }
+
+        return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
+      } catch (error) {
+        console.error('Error getting test user emails:', error);
+      }
+      return res.status(200).json({ success: true, emails });
     }
 
     const db = await connectDB();
@@ -46,23 +80,23 @@ export const pollEmails = async (req, res) => {
     let user = await cacheUtils.getCache(`userbasic:${userId}`);
 
     if (!user) {
-      user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE id = ?`, [userId]);
+      user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser FROM users WHERE id = ?`, [userId]);
     }
 
     if (!user.label_id) {
       return res.status(400).json({ error: 'No Gmail label configured for this user.' });
     }
 
-    let webhook = cacheUtils.getCache(`discord_webhook:${userId}`);
+    let webhook = await cacheUtils.getCache(`discord_webhook:${userId}`);
 
     if (!webhook) {
       const activeuser = await db.get(
         `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
         [userId]
       );
-    
-      if (!activeuser) return null;
-    
+
+      if (!activeuser) return res.status(401).json({ error: 'No Authorized User Found' });
+
       const { discord_webhook } = decryptMultipleFields(
         activeuser.credentials_encrypted_data,
         activeuser.credentials_iv,
@@ -70,7 +104,7 @@ export const pollEmails = async (req, res) => {
       );
 
       webhook = discord_webhook;
-      cacheUtils.setCache(`discord_webhook:${userId}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
+      await cacheUtils.setCache(`discord_webhook:${userId}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
     }
 
     // Get OAuth2 client
@@ -100,7 +134,6 @@ export const pollEmails = async (req, res) => {
     });
 
     const messages = data.messages || [];
-    const jobEmails = [];
 
     console.log(`Found ${messages.length} emails in the last ${pollIntervalMinutes} minutes`);
 
@@ -176,6 +209,10 @@ export const migrateOldMessages = async (req, res) => {
   try {
     const userId = req.userId;
 
+    if (req.testUser) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -183,9 +220,9 @@ export const migrateOldMessages = async (req, res) => {
     const db = await connectDB();
 
     await db.run('BEGIN TRANSACTION');
-    
+
     try {
-      const user = await db.get(`SELECT email, label_id FROM users WHERE id = ?`, [userId]);
+      const user = await db.get(`SELECT email, label_id, isTestUser FROM users WHERE id = ?`, [userId]);
 
       if (!user?.label_id) {
         await db.run('ROLLBACK');
@@ -209,7 +246,7 @@ export const migrateOldMessages = async (req, res) => {
       });
 
       const matchedMessages = oldMatches.data.messages || [];
-      
+
       await db.run('COMMIT');
 
       // Process messages (this doesn't need to be in the transaction)
@@ -308,7 +345,7 @@ export const saveToSupabase = async (userId, emailData) => {
     console.error('Supabase credentials not configured');
     return false;
   }
-  
+
   if (!userId || !emailData) {
     console.error('Missing required parameters for Supabase save');
     return false;
