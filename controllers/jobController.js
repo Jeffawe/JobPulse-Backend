@@ -5,7 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 import { connectDB } from '../db/database.js';
 import { google } from 'googleapis';
 import { createGmailFilter } from './authController.js';
-import { cacheUtils } from '../config/cacheConfig.js';
+import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 
 const extractEmailFields = (email) => {
   const headers = email.payload.headers;
@@ -46,11 +46,31 @@ export const pollEmails = async (req, res) => {
     let user = await cacheUtils.getCache(`userbasic:${userId}`);
 
     if (!user) {
-      user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE email = ?`, [email]);
+      user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE id = ?`, [userId]);
     }
 
     if (!user.label_id) {
       return res.status(400).json({ error: 'No Gmail label configured for this user.' });
+    }
+
+    let webhook = cacheUtils.getCache(`discord_webhook:${userId}`);
+
+    if (!webhook) {
+      const activeuser = await db.get(
+        `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+        [userId]
+      );
+    
+      if (!activeuser) return null;
+    
+      const { discord_webhook } = decryptMultipleFields(
+        activeuser.credentials_encrypted_data,
+        activeuser.credentials_iv,
+        activeuser.credentials_auth_tag
+      );
+
+      webhook = discord_webhook;
+      cacheUtils.setCache(`discord_webhook:${userId}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
     }
 
     // Get OAuth2 client
@@ -108,7 +128,7 @@ export const pollEmails = async (req, res) => {
     if (jobEmails.length > 0) {
       try {
         await db.run('BEGIN TRANSACTION');
-        await addManyToEmailUpdates(jobEmails, userId, user.discord_webhook);
+        await addManyToEmailUpdates(jobEmails, userId, webhook);
         await db.run('COMMIT');
       } catch (error) {
         await db.run('ROLLBACK');

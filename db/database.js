@@ -9,8 +9,14 @@ export const addColumns = async () => {
   const db = await connectDB();
 
   await db.exec(`ALTER TABLE users ADD COLUMN label_id TEXT`);
+};
 
-  return db;
+export const deleteDB = async () => {
+  ensureDBFolderExists();
+
+  const db = await connectDB();
+
+  await db.exec(`DROP TABLE IF EXISTS users;`);
 };
 
 export const initDB = async () => {
@@ -19,24 +25,26 @@ export const initDB = async () => {
   const db = await connectDB();
 
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE,
-      refresh_token TEXT NOT NULL,
-      discord_webhook TEXT NOT NULL,
-      notification_channel TEXT,
-      notification_value TEXT,
-      gmail_watch_label TEXT,
-      gmail_history_id TEXT,
-      gmail_watch_expiration TEXT,
-      notification_status TEXT,
-      email_addresses TEXT,
-      discord_id TEXT,
-      guild_id TEXT,
-      label_id TEXT
-    );
-  `);
+  CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    credentials_encrypted_data TEXT,
+    credentials_iv TEXT,
+    credentials_auth_tag TEXT,
+    discord_webhook BOOLEAN DEFAULT false,
+    notification_channel TEXT,
+    notification_value TEXT,
+    gmail_watch_label TEXT,
+    gmail_history_id TEXT,
+    gmail_watch_expiration TEXT,
+    notification_status TEXT,
+    email_addresses TEXT,
+    discord_id TEXT,
+    guild_id TEXT,
+    label_id TEXT
+  );
+`);
 
   return db;
 };

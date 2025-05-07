@@ -5,7 +5,7 @@ import jobRoutes from './routes/jobRoute.js';
 import authRoutes from './routes/authRoute.js';
 import { verifyApiKey } from './middleware/apikey.js';
 import { initDB, initApplicationDB } from './db/database.js';
-import { addColumns } from './db/database.js';
+import { addColumns, deleteDB } from './db/database.js';
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
 
@@ -50,6 +50,18 @@ if (!process.env.API_KEY) {
 app.get('/', (req, res) => {
     res.send('Welcome to the Job Pulse API');
 });
+
+app.get('/delete', (req, res) => {
+    try {
+        deleteDB();
+        res.status(200).json({
+            status: 'success',
+            message: 'Database deleted successfully'
+        });
+    } catch (err) {
+        console.log(err)
+    }
+})
 
 app.get('/setup', (req, res) => {
     try {

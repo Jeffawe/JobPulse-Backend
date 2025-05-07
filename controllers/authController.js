@@ -4,6 +4,7 @@ import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { google } from 'googleapis';
+import { encryptMultipleFields, decryptMultipleFields } from '../services/encryption.js';
 
 dotenv.config();
 
@@ -45,6 +46,11 @@ export const authController = {
       // Check if user exists
       let user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
 
+      const { iv, encryptedData, authTag } = encryptMultipleFields({
+        refresh_token,
+        discord_webhook: null
+      });
+
       if (!user) {
         firstTime = true;
 
@@ -52,8 +58,24 @@ export const authController = {
         const label = success ? labelId : null;
 
         await db.run(
-          `INSERT INTO users (email, name, refresh_token, discord_webhook, label_id) VALUES (?, ?, ?, ?, ?)`,
-          [userData.email, userData.name, refresh_token, "NULL" || null, label]
+          `INSERT INTO users (
+            email,
+            name,
+            credentials_encrypted_data,
+            credentials_iv,
+            credentials_auth_tag,
+            discord_webhook,
+            label_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            userData.email,
+            userData.name,
+            encryptedData,
+            iv,
+            authTag,
+            false,
+            label
+          ]
         );
 
         user = await db.get(`SELECT * FROM users WHERE email = ?`, [userData.email]);
@@ -79,8 +101,22 @@ export const authController = {
 
         if (update) {
           await db.run(
-            `UPDATE users SET refresh_token = COALESCE(?, refresh_token), label_id = COALESCE(?, label_id) WHERE email = ?`,
-            [refresh_token, finalLabel, userData.email]
+            `UPDATE users
+             SET
+               credentials_encrypted_data = COALESCE(?, credentials_encrypted_data),
+               credentials_iv = COALESCE(?, credentials_iv),
+               credentials_auth_tag = COALESCE(?, credentials_auth_tag),
+               label_id = COALESCE(?, label_id),
+               discord_webhook = ?
+             WHERE email = ?`,
+            [
+              encryptedData,
+              iv,
+              authTag,
+              finalLabel,
+              false,
+              userData.email
+            ]
           );
         }
       }
@@ -139,16 +175,20 @@ export const authController = {
       }
 
       const tokenRow = await db.get(
-        `SELECT refresh_token FROM users WHERE id = ?`,
+        `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
         [userId]
       );
 
-      if (!tokenRow?.refresh_token) {
-        return res.status(401).json({ error: 'No refresh token available' });
-      }
+      if (!tokenRow) throw new Error("User not found");
+
+      const { refresh_token } = decryptMultipleFields(
+        tokenRow.credentials_encrypted_data,
+        tokenRow.credentials_iv,
+        tokenRow.credentials_auth_tag
+      );
 
       const oauth2Client = getOAuth2ClientBasic();
-      oauth2Client.setCredentials({ refresh_token: tokenRow.refresh_token });
+      oauth2Client.setCredentials({ refresh_token: refresh_token });
       const { success, labelId } = await createGmailFilter(oauth2Client);
 
       if (success && labelId) {
@@ -197,70 +237,73 @@ export const authController = {
   },
 
   async deleteAccount(req, res) {
-    try {
-      if (!req.userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!req.userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-      const userId = req.params.userId;
-      if (!userId) {
-        return res.status(400).json({ error: 'User ID is required' });
+    const userId = req.params.userId;
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const db = await connectDB();
+    await db.run('BEGIN TRANSACTION');
+
+    try {
+      // Get encrypted credentials
+      const user = await db.get(
+        `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+        [userId]
+      );
+
+      if (!user) {
+        await db.run('ROLLBACK');
+        return res.status(404).json({ error: 'User not found' });
       }
 
-      const db = await connectDB();
-
-      await db.run('BEGIN TRANSACTION');
-
+      // Revoke Google token
+      let revokeAccess = false;
       try {
-        // Fetch user first to get refresh_token
-        const user = await db.get(`SELECT * FROM users WHERE id = ?`, [userId]);
-        if (!user) {
-          await db.run('ROLLBACK');
-          return res.status(404).json({ error: 'User not found' });
-        }
-
-        revokeAccess = false;
-        if (user.refresh_token) {
-          try {
-            const response = await fetch('https://oauth2.googleapis.com/revoke', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              body: `token=${user.refresh_token}`
-            });
-
-            if (response.ok) {
-              revokeAccess = true;
-            }
-          } catch (revokeErr) {
-            console.warn('Failed to revoke Google token:', revokeErr);
-          }
-        }
-
-        // Delete user from DB
-        const result = await db.run(`DELETE FROM users WHERE id = ?`, [userId]);
-        if (result.changes === 0) {
-          await db.run('ROLLBACK');
-          return res.status(404).json({ error: 'User not found' });
-        }
-
-        await db.run(
-          `DELETE FROM application_tracking WHERE user_id = ?`,
-          [userId]
+        const { refresh_token } = decryptMultipleFields(
+          user.credentials_encrypted_data,
+          user.credentials_iv,
+          user.credentials_auth_tag
         );
 
-        // Commit changes
-        await db.run('COMMIT');
+        if (refresh_token) {
+          const response = await fetch('https://oauth2.googleapis.com/revoke', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `token=${refresh_token}`
+          });
 
-        // Clear cache
-        await cacheUtils.deleteCache(`userbasic:${userId}`);
-
-        res.status(200).json({ message: 'Account deleted and access revoked', revokeAccess: revokeAccess });
-      } catch (error) {
-        // Rollback on error
-        await db.run('ROLLBACK');
-        throw error;
+          revokeAccess = response.ok;
+          if (!revokeAccess) {
+            console.warn('Failed to revoke Google token: Non-200 response');
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to decrypt and revoke refresh token:', err);
       }
+
+      // Delete user and related records
+      const deleteUser = await db.run(`DELETE FROM users WHERE id = ?`, [userId]);
+      if (deleteUser.changes === 0) {
+        await db.run('ROLLBACK');
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      await db.run(`DELETE FROM application_tracking WHERE user_id = ?`, [userId]);
+
+      await db.run('COMMIT');
+      await cacheUtils.deleteCache(`userbasic:${userId}`);
+
+      res.status(200).json({ message: 'Account deleted and access revoked', revokeAccess });
+
     } catch (error) {
+      await db.run('ROLLBACK');
       console.error('Delete account error:', error);
       res.status(500).json({ error: 'Failed to delete account' });
     }
@@ -393,29 +436,67 @@ export const UpdateUserNotifications = async (req, res) => {
     await db.run('BEGIN TRANSACTION');
 
     try {
-      let user = await cacheUtils.getCache(`userbasic:${userId}`);
-
-      if (!user) {
-        user = await db.get(`SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id FROM users WHERE email = ?`, [email]);
-      }
+      const user = await db.get(
+        `SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, 
+                credentials_encrypted_data, credentials_iv, credentials_auth_tag, discord_webhook
+         FROM users WHERE id = ?`,
+        [userId]
+      );
 
       if (!user) {
         await db.run('ROLLBACK');
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Rest of the function remains the same
-      const updatedWebhook = discord_webhook ?? user.discord_webhook;
+      let decryptedCreds;
+      try {
+        decryptedCreds = decryptMultipleFields(
+          user.credentials_encrypted_data,
+          user.credentials_iv,
+          user.credentials_auth_tag
+        );
+      } catch (err) {
+        await db.run('ROLLBACK');
+        return res.status(500).json({ error: 'Failed to decrypt credentials' });
+      }
+
+      // Update the webhook value
+      const updatedWebhook = discord_webhook ?? decryptedCreds.discord_webhook;
+      const updatedCreds = {
+        refresh_token: decryptedCreds.refresh_token,
+        discord_webhook: updatedWebhook
+      };
+
+      // Re-encrypt
+      const { encryptedData, iv, authTag } = encryptMultipleFields(updatedCreds);
+
+      // Update fields
       const updatedChannel = notification_channel ?? user.notification_channel;
       const updatedValue = notification_value ?? user.notification_value;
 
       await db.run(
         `UPDATE users 
-         SET discord_webhook = ?, notification_channel = ?, notification_value = ? 
-         WHERE email = ?`,
-        [updatedWebhook, updatedChannel, updatedValue, email]
+          SET 
+            credentials_encrypted_data = ?,
+            credentials_iv = ?,
+            credentials_auth_tag = ?,
+            discord_webhook = ?,
+            notification_channel = ?,
+            notification_value = ?
+          WHERE email = ?`,
+        [
+          encryptedData,
+          iv,
+          authTag,
+          Boolean(updatedWebhook),
+          updatedChannel,
+          updatedValue,
+          email
+        ]
       );
 
+      cacheUtils.setCache(`discord_webhook:${userId}`, updatedWebhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
+      
       // Commit changes
       await db.run('COMMIT');
 

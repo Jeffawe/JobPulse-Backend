@@ -5,6 +5,7 @@ import { NLPProcessor } from '../services/nlpProcessor.js';
 import { addManyToEmailUpdates } from '../services/memoryStore.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 import { cacheUtils } from '../config/cacheConfig.js';
+import { encryptMultipleFields, decryptMultipleFields } from '../services/encryption.js';
 
 // Setup Gmail push notifications for a user
 export const setupGmailPushNotifications = async (req, res) => {
@@ -16,18 +17,18 @@ export const setupGmailPushNotifications = async (req, res) => {
     }
 
     const db = await connectDB();
-    
+
     // Fix variable declaration issues
     let user = await cacheUtils.getCache(`userbasic:${userId}`);
 
     if (!user) {
       user = await db.get('SELECT id, label_id FROM users WHERE id = ?', [userId]);
-      
+
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
     }
-    
+
     if (!user.label_id) {
       return res.status(400).json({ error: 'No Gmail label configured for this user' });
     }
@@ -35,14 +36,14 @@ export const setupGmailPushNotifications = async (req, res) => {
     // Get OAuth2 client for the user
     const oauth2Client = await getOAuth2Client(userId);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-    
+
     // Validate environment variables
     if (!process.env.GOOGLE_CLOUD_PROJECT_ID || !process.env.PUBSUB_TOPIC_NAME) {
       return res.status(500).json({ error: 'Google Cloud configuration missing' });
     }
-    
 
-   // Create a Pub/Sub topic if you don't have one already
+
+    // Create a Pub/Sub topic if you don't have one already
     // Note: You must create this topic in Google Cloud Console first
     const topicName = `projects/${process.env.GOOGLE_CLOUD_PROJECT_ID}/topics/${process.env.PUBSUB_TOPIC_NAME}`;
 
@@ -71,7 +72,7 @@ export const setupGmailPushNotifications = async (req, res) => {
         'UPDATE users SET gmail_history_id = ?, gmail_watch_label = ?, gmail_watch_expiration = ? WHERE id = ?',
         [historyId, labelId, expiration, userId]
       );
-      
+
       await db.run('COMMIT');
       await cacheUtils.deleteCache(`userbasic:${userId}`);
 
@@ -107,19 +108,19 @@ export const handleGmailPushNotification = async (req, res) => {
       console.error('Error parsing Pub/Sub message data:', parseError);
       return res.status(400).json({ error: 'Invalid message data format' });
     }
-    
+
     const { emailAddress, historyId } = data;
-    
+
     if (!emailAddress || !historyId) {
       console.error('Missing required fields in push notification data');
       return res.status(200).end(); // Acknowledge message to avoid retries
     }
 
     const db = await connectDB();
-    
+
     // Start transaction
     await db.run('BEGIN TRANSACTION');
-    
+
     try {
       const user = await db.get('SELECT id, gmail_history_id, discord_webhook, label_id FROM users WHERE email = ?', [emailAddress]);
 
@@ -127,6 +128,26 @@ export const handleGmailPushNotification = async (req, res) => {
         console.log(`No user found for email: ${emailAddress}`);
         await db.run('ROLLBACK');
         return res.status(200).end();
+      }
+
+      let webhook = cacheUtils.getCache(`discord_webhook:${user.id}`);
+
+      if (!webhook) {
+        const activeuser = await db.get(
+          `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+          [user.id]
+        );
+
+        if (!activeuser) return null;
+
+        const { discord_webhook } = decryptMultipleFields(
+          activeuser.credentials_encrypted_data,
+          activeuser.credentials_iv,
+          activeuser.credentials_auth_tag
+        );
+
+        webhook = discord_webhook;
+        cacheUtils.setCache(`discord_webhook:${user.id}`, webhook, CACHE_DURATIONS.DISCORD_WEBHOOK);
       }
 
       const oauth2Client = await getOAuth2Client(user.id);
@@ -163,12 +184,12 @@ export const handleGmailPushNotification = async (req, res) => {
 
       // Batch process valid job emails
       if (jobEmails.length > 0) {
-        await addManyToEmailUpdates(jobEmails, user.id, user.discord_webhook);
+        await addManyToEmailUpdates(jobEmails, user.id, webhook);
       }
 
       // Update last processed Gmail history ID
       await db.run('UPDATE users SET gmail_history_id = ? WHERE id = ?', [historyId, user.id]);
-      
+
       await db.run('COMMIT');
       return res.status(200).end();
     } catch (error) {
@@ -188,7 +209,7 @@ export const refreshGmailWatch = async (userId) => {
 
     // Start transaction
     await db.run('BEGIN TRANSACTION');
-    
+
     try {
       // Get user watch expiration
       const user = await db.get('SELECT gmail_watch_expiration, label_id FROM users WHERE id = ?', [userId]);
@@ -232,7 +253,7 @@ export const refreshGmailWatch = async (userId) => {
           'UPDATE users SET gmail_history_id = ?, gmail_watch_expiration = ? WHERE id = ?',
           [historyId, newExpiration, userId]
         );
-        
+
         await db.run('COMMIT');
         await cacheUtils.deleteCache(`userbasic:${userId}`);
         return true;

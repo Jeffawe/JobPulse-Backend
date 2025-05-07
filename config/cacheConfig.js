@@ -5,6 +5,7 @@ dotenv.config();
 // Cache durations in seconds
 export const CACHE_DURATIONS = {
     USER_PROFILE: 1800,       // 30 minutes
+    DISCORD_WEBHOOK: 3600,   // 1 hour
 };
 
 // Create Redis client
