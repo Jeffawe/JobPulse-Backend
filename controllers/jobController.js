@@ -48,7 +48,7 @@ export const pollEmails = async (req, res) => {
 
       try {
         for (const email of emails) {
-          const { subject, from, body, date } = extractEmailFields(email);
+          const { subject, from, body, date } = email;
           const processedEmail = NLPProcessor({ subject, from, body, date });
 
           if (processedEmail.isJobEmail) {
@@ -338,7 +338,6 @@ export const sendToDiscord = async (webhookUrl, emailData) => {
     return { success: false, error: error.message };
   }
 };
-
 
 export const saveToSupabase = async (userId, emailData) => {
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {

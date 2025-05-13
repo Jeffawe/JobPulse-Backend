@@ -4,8 +4,14 @@ import { sendToDiscord, saveToSupabase } from '../controllers/jobController.js';
 import { connectDB } from '../db/database.js';
 import { getTestUserEmails } from './testUserEmail.js';
 import { cacheUtils } from '../config/cacheConfig.js';
+import { decryptMultipleFields } from './encryption.js';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const possibleUpdates = [];
+const BOT_URL = process.env.BOT_URL;
 
 const emailUpdatesStore = {
   emailsById: new Map(),
@@ -79,11 +85,15 @@ async function refreshCacheIfNeeded(userId) {
         let webhook = await cacheUtils.getCache(`discord_webhook:${userId}`)
 
         if (!webhook) {
-
+          const db = await connectDB()
           const user = await db.get(
             `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag, isTestUser FROM users WHERE id = ?`,
             [userId]
           );
+
+          if (!user || user.isTestUser) {
+            break;
+          }
 
           const { discord_webhook } = decryptMultipleFields(
             user.credentials_encrypted_data,
@@ -95,7 +105,7 @@ async function refreshCacheIfNeeded(userId) {
         }
 
         // Fetch fresh data from permanent storage
-        const freshData = await GetDataFromBot(userId, user.isTestUser);
+        const freshData = await GetDataFromBot(userId, user.isTestUser, webhook);
 
         if (!Array.isArray(freshData)) {
           throw new Error('GetDataFromBot did not return an array');
@@ -120,13 +130,54 @@ async function refreshCacheIfNeeded(userId) {
   }
 }
 
-const GetDataFromBot = async (userId, isTestUser) => {
+const GetDataFromBot = async (userId, isTestUser, webhookUrl) => {
   if (isTestUser) {
     return await getTestUserEmails(userId);
   }
 
-  return []
-}
+  if (!webhookUrl) {
+    return [];
+  }
+
+  try {
+    // Fetch messages from the bot API (with today’s date for filtering)
+    const today = new Date().toISOString().split('T')[0];
+
+    const res = await fetch(`${BOT_URL}/discord/messages?date=${today}&page=1&limit=20`, {
+      method: 'GET',
+      headers: {
+        'X-Discord-Webhook': webhookUrl,
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.BOT_SECRET}`
+      }
+    });
+    
+    if (!res.ok) {
+      const error = await res.text();
+      console.error(`Failed to fetch from Discord endpoint: ${error}`);
+      return [];
+    }
+
+    const data = await res.json();
+
+    // Optional: map messages to match your internal format
+    const formatted = data.messages.map(msg => {
+      const embed = msg.embeds[0] || {};
+      return {
+        subject: embed.title?.replace('Job Update: ', '') || msg.content || 'No Subject',
+        from: embed.fields?.find(f => f.name === 'From')?.value || 'Unknown',
+        status: embed.fields?.find(f => f.name === 'Status')?.value || 'Unknown',
+        date: embed.fields?.find(f => f.name === 'Date')?.value || msg.timestamp,
+        body: embed.description || 'No snippet available.',
+      };
+    });
+
+    return formatted;
+  } catch (err) {
+    console.error('Error fetching real user data from bot:', err);
+    return [];
+  }
+};
 
 // Clear cache for specific user
 function clearUserCache(userId) {

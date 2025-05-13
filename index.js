@@ -1,6 +1,7 @@
 import app from './app.js';
 import http from 'http';
 import { initializeSocketServer } from './services/memoryStore.js';
+import './cron/cronJobs.js'
 
 // Create HTTP server
 const server = http.createServer(app);

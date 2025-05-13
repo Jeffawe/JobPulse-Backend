@@ -51,23 +51,23 @@ app.get('/', (req, res) => {
     res.send('Welcome to the Job Pulse API');
 });
 
-app.get('/delete', (req, res) => {
-    try {
-        deleteDB();
-        res.status(200).json({
-            status: 'success',
-            message: 'Database deleted successfully'
-        });
-    } catch (err) {
-        console.log(err)
-    }
-})
+// app.get('/delete', (req, res) => {
+//     try {
+//         deleteDB();
+//         res.status(200).json({
+//             status: 'success',
+//             message: 'Database deleted successfully'
+//         });
+//     } catch (err) {
+//         console.log(err)
+//     }
+// })
 
 app.get('/setup', (req, res) => {
     try {
         initDB();
         initApplicationDB();
-        //addColumns()
+        // addColumns()
         res.status(200).json({
             status: 'success',
             message: 'Database initialized successfully'

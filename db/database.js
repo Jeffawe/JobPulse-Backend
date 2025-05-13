@@ -8,7 +8,7 @@ const dbPath = '../db/database.sqlite';
 export const addColumns = async () => {
   const db = await connectDB();
 
-  await db.exec(`ALTER TABLE users ADD COLUMN isTestUser BOOLEAN DEFAULT false;`);
+  await db.exec(`ALTER TABLE users ADD COLUMN created_at TEXT DEFAULT (datetime('now'));`);
 };
 
 export const deleteDB = async () => {
@@ -43,7 +43,8 @@ export const initDB = async () => {
     discord_id TEXT,
     guild_id TEXT,
     label_id TEXT,
-    isTestUser BOOLEAN DEFAULT false
+    isTestUser BOOLEAN DEFAULT false,
+    created_at TEXT DEFAULT (datetime('now'))
   );
 `);
 

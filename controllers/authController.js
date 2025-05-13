@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { google } from 'googleapis';
 import { encryptMultipleFields, decryptMultipleFields } from '../services/encryption.js';
+import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
@@ -15,6 +16,58 @@ const generateRandomString = (length) => {
     result += characters.charAt(Math.floor(Math.random() * characters.length));
   }
   return result;
+}
+
+const generateTestUser = async (db) => {
+  try {
+    const testEmail = `demo-${uuidv4().substring(0, 8)}@testing.com`;
+    let testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
+
+    if (!testUser) {
+      // Generate secure but fake credentials
+      const fakeCredentials = {
+        refresh_token: `test_${generateRandomString(30)}`,
+        discord_webhook: 'test_discord_webhook'
+      };
+
+      // Encrypt the fake credentials
+      const { testencryptedData, testiv, testauthTag } = encryptMultipleFields(fakeCredentials);
+
+      await db.run(
+        `INSERT INTO users (
+        email,
+        name,
+        credentials_encrypted_data,
+        credentials_iv,
+        credentials_auth_tag,
+        discord_webhook,
+        label_id,
+        isTestUser
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          testEmail,
+          'Test User',
+          testencryptedData,
+          testiv,
+          testauthTag,
+          false,
+          null,
+          true
+        ]
+      );
+
+      testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
+    }
+
+    if (!testUser) {
+      throw new Error("Failed to create test user");
+    }
+
+    return testUser;
+  } catch (e) {
+    console.log(e);
+    throw new Error("Failed to create test user");
+  }
 }
 
 export const authController = {
@@ -28,8 +81,9 @@ export const authController = {
 
       const db = await connectDB();
 
+      console.log('is_test_user', is_test_user);
       if (is_test_user) {
-        const testUser = await this.generateTestUser(db);
+        const testUser = await generateTestUser(db);
 
         const testJwtToken = jwt.sign(
           { userId: testUser.id, is_test_user: true },
@@ -39,7 +93,7 @@ export const authController = {
 
         await cacheUtils.setCache(`testUser${testUser.id}`, testUser, CACHE_DURATIONS.USER_PROFILE);
 
-        res.json({ token: testJwtToken, user: testUser, firstTime: true });
+        return res.json({ token: testJwtToken, user: testUser, firstTime: true });
       }
 
       // Exchange code for tokens
@@ -200,58 +254,6 @@ export const authController = {
     }
   },
 
-  async generateTestUser(db) {
-    try {
-      const testEmail = `demo-${uuidv4().substring(0, 8)}@testing.com`;
-      let testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
-
-      if (!testUser) {
-        // Generate secure but fake credentials
-        const fakeCredentials = {
-          refresh_token: `test_${generateRandomString(30)}`,
-          discord_webhook: 'test_discord_webhook'
-        };
-
-        // Encrypt the fake credentials
-        const { testencryptedData, testiv, testauthTag } = encryptMultipleFields(fakeCredentials);
-
-        await db.run(
-          `INSERT INTO users (
-          email,
-          name,
-          credentials_encrypted_data,
-          credentials_iv,
-          credentials_auth_tag,
-          discord_webhook,
-          label_id,
-          isTestUser
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            testEmail,
-            'Test User',
-            testencryptedData,
-            testiv,
-            testauthTag,
-            false,
-            null,
-            true
-          ]
-        );
-
-        testUser = await db.get(`SELECT * FROM users WHERE email = ?`, [testEmail]);
-      }
-
-      if (!testUser) {
-        throw new Error("Failed to create test user");
-      }
-
-      return testUser;
-    } catch (e) {
-      console.log(e);
-      throw new Error("Failed to create test user");
-    }
-  },
-
   async createGmailFilterEndPoint(req, res) {
     try {
       const userId = req.userId;
@@ -328,7 +330,7 @@ export const authController = {
 
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-      const cacheKey = `userbasic:${userId}`;
+      let cacheKey = `userbasic:${userId}`;
       if (testUser) {
         cacheKey = `testUser${userId}`
       }
