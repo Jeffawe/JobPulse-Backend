@@ -7,6 +7,8 @@ import { cacheUtils } from '../config/cacheConfig.js';
 import { decryptMultipleFields } from './encryption.js';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
+import { NLPProcessor } from './nlpProcessor.js';
+import { console } from 'inspector';
 
 dotenv.config();
 
@@ -29,11 +31,11 @@ export const initializeSocketServer = (server) => {
   emailUpdatesStore.io = new Server(server);
 
   emailUpdatesStore.io.on('connection', (socket) => {
-    socket.on('register', async (userId) => {
+    socket.on('register', async (userId, isTestUser) => {
       emailUpdatesStore.connections.set(userId, socket);
 
       // Check if cache needs refreshing when a user connects
-      await refreshCacheIfNeeded(userId);
+      await refreshCacheIfNeeded(userId, isTestUser);
 
       // Send cached data to the newly connected user
       const userEmails = getEmailsFromCache(userId);
@@ -51,11 +53,11 @@ function getEmailsFromCache(userId) {
 
   for (let i = emailUpdatesStore.queue.length - 1; i >= 0; i--) {
     const email = emailUpdatesStore.queue[i];
+
     if (email.metadata?.userId === userId) {
       // Only process entries with both job_title and company_name
       if (email.job_title && email.company_name) {
         const fingerprint = generateFingerprint(email.job_title, email.company_name);
-
         // Only keep the latest email for each job application
         if (!latestEmailByFingerprint.has(fingerprint)) {
           latestEmailByFingerprint.set(fingerprint, email);
@@ -68,7 +70,7 @@ function getEmailsFromCache(userId) {
 }
 
 // Function to check if cache needs refreshing and do so if needed
-async function refreshCacheIfNeeded(userId) {
+async function refreshCacheIfNeeded(userId, isTestUser = false) {
   const now = Date.now();
   const needsRefresh = !emailUpdatesStore.lastRefreshed ||
     (now - emailUpdatesStore.lastRefreshed) > CACHE_EXPIRATION;
@@ -84,14 +86,19 @@ async function refreshCacheIfNeeded(userId) {
 
         let webhook = await cacheUtils.getCache(`discord_webhook:${userId}`)
 
-        if (!webhook) {
+        if (!webhook && !isTestUser) {
           const db = await connectDB()
           const user = await db.get(
             `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag, isTestUser FROM users WHERE id = ?`,
             [userId]
           );
 
-          if (!user || user.isTestUser) {
+          if (!user) {
+            break;
+          }
+
+          if (user.isTestUser) {
+            isTestUser = true
             break;
           }
 
@@ -105,13 +112,13 @@ async function refreshCacheIfNeeded(userId) {
         }
 
         // Fetch fresh data from permanent storage
-        const freshData = await GetDataFromBot(userId, user.isTestUser, webhook);
+        const freshData = await GetDataFromBot(userId, isTestUser, webhook);
 
         if (!Array.isArray(freshData)) {
           throw new Error('GetDataFromBot did not return an array');
         }
 
-        await addManyToEmailUpdates(freshData, userId, webhook, user.isTestUser);
+        await addManyToEmailUpdates(freshData, userId, webhook, isTestUser);
 
         emailUpdatesStore.lastRefreshed = now;
         break; // Success, exit retry loop
@@ -132,7 +139,10 @@ async function refreshCacheIfNeeded(userId) {
 
 const GetDataFromBot = async (userId, isTestUser, webhookUrl) => {
   if (isTestUser) {
-    return await getTestUserEmails(userId);
+    const rawEmails = await getTestUserEmails(userId);
+    const structuredEmails = rawEmails.map(NLPProcessor);
+    console.log(structuredEmails)
+    return structuredEmails;
   }
 
   if (!webhookUrl) {
@@ -151,7 +161,7 @@ const GetDataFromBot = async (userId, isTestUser, webhookUrl) => {
         'Authorization': `Bearer ${process.env.BOT_SECRET}`
       }
     });
-    
+
     if (!res.ok) {
       const error = await res.text();
       console.error(`Failed to fetch from Discord endpoint: ${error}`);
@@ -172,7 +182,7 @@ const GetDataFromBot = async (userId, isTestUser, webhookUrl) => {
       };
     });
 
-    return formatted;
+    return formatted.map(email => NLPProcessor(email));
   } catch (err) {
     console.error('Error fetching real user data from bot:', err);
     return [];
@@ -201,11 +211,16 @@ function clearUserCache(userId) {
 }
 
 function hashContent(content) {
+  if (typeof content !== 'string') {
+    content = String(content ?? '');
+  }
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
 function generateFingerprint(jobTitle, companyName) {
-  const base = `${jobTitle.toLowerCase().trim()}_${companyName.toLowerCase().trim()}`;
+  const safeJobTitle = (jobTitle ?? '').toLowerCase().trim();
+  const safeCompanyName = (companyName ?? '').toLowerCase().trim();
+  const base = `${safeJobTitle}_${safeCompanyName}`;
   return hashContent(base);
 }
 
@@ -439,16 +454,21 @@ export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUs
 
 // API endpoint to get emails with optional refresh from permanent storage
 export const getEmails = async (req, res) => {
-  const { userId } = req;
-  if (!userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  const { refresh } = req.query;
+  try {
+    const { userId, testUser } = req;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const { refresh } = req.query;
 
-  if (refresh === 'true') {
-    await refreshCacheIfNeeded(userId);
-  }
+    if (refresh === 'true') {
+      await refreshCacheIfNeeded(userId, testUser);
+    }
 
-  const emails = getEmailsFromCache(userId);
-  res.json({ success: true, emails });
+    const emails = getEmailsFromCache(userId);
+    res.json({ success: true, emails });
+  } catch (error) {
+    console.error('Error in getEmails:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 };

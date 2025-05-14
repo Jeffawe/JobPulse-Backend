@@ -81,9 +81,14 @@ export const authController = {
 
       const db = await connectDB();
 
-      console.log('is_test_user', is_test_user);
       if (is_test_user) {
-        const testUser = await generateTestUser(db);
+        let testUser = await cacheUtils.getCache(`userbasic:${token}`);
+
+        if (!testUser) {
+          testUser = await db.get(`SELECT * FROM users WHERE id = ?`, [token]);
+        }
+
+        if (!testUser) testUser = await generateTestUser(db);
 
         const testJwtToken = jwt.sign(
           { userId: testUser.id, is_test_user: true },
@@ -91,7 +96,7 @@ export const authController = {
           { expiresIn: '1d' }
         );
 
-        await cacheUtils.setCache(`testUser${testUser.id}`, testUser, CACHE_DURATIONS.USER_PROFILE);
+        await cacheUtils.setCache(`userbasic:${testUser.id}`, testUser, CACHE_DURATIONS.USER_PROFILE);
 
         return res.json({ token: testJwtToken, user: testUser, firstTime: true });
       }
@@ -331,9 +336,6 @@ export const authController = {
       if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
       let cacheKey = `userbasic:${userId}`;
-      if (testUser) {
-        cacheKey = `testUser${userId}`
-      }
       const cachedUser = await cacheUtils.getCache(cacheKey);
 
       if (cachedUser) return res.json(cachedUser);
@@ -380,8 +382,7 @@ export const authController = {
       }
 
       if (!user) {
-        await db.run('ROLLBACK');
-        return res.status(404).json({ error: 'User not found' });
+        throw new Error('User not found');
       }
 
       if (!req.testUser) {

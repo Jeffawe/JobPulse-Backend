@@ -55,7 +55,6 @@ export const getTestUserEmails = async (userId) => {
         status,
       });
     }
-
     return emails;
   } catch (error) {
     console.error("Error generating test emails:", error);
