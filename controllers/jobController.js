@@ -7,6 +7,7 @@ import { google } from 'googleapis';
 import { createGmailFilter } from './authController.js';
 import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import { getTestUserEmails } from '../services/testUserEmail.js';
+import { decryptMultipleFields } from '../services/encryption.js';
 
 const extractEmailFields = (email) => {
   const headers = email.payload.headers;
@@ -33,46 +34,46 @@ const extractEmailFields = (email) => {
   return { subject, from, body, date };
 }
 
-export const pollEmails = async (req, res) => {
+export const pollEmailsCore = async (userId, testUser = false) => {
   try {
-    const { userId, testUser } = req;
     let storageLoc = 'discord';
+    let transactionStarted = false;
     const jobEmails = [];
 
     if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' });
+      throw new Error('User ID is required');
     }
 
     if (testUser) {
       const emails = await getTestUserEmails(userId);
 
-      try {
-        for (const email of emails) {
-          const { subject, from, body, date } = email;
-          const processedEmail = NLPProcessor({ subject, from, body, date });
+      for (const email of emails) {
+        const { subject, from, body, date } = email;
+        const processedEmail = NLPProcessor({ subject, from, body, date });
 
-          if (processedEmail.isJobEmail) {
-            jobEmails.push(processedEmail);
-          }
+        if (processedEmail.isJobEmail) {
+          jobEmails.push(processedEmail);
         }
-
-        if (jobEmails.length > 0) {
-          try {
-            await db.run('BEGIN TRANSACTION');
-            await addManyToEmailUpdates(jobEmails, userId, webhook, true);
-            await db.run('COMMIT');
-          } catch (error) {
-            await db.run('ROLLBACK');
-            console.error('Transaction failed during email processing:', error);
-            throw error; // Re-throw to be caught by the outer catch block
-          }
-        }
-
-        return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
-      } catch (error) {
-        console.error('Error getting test user emails:', error);
       }
-      return res.status(200).json({ success: true, emails });
+
+      if (jobEmails.length > 0) {
+        try {
+          await db.run('BEGIN TRANSACTION');
+          transactionStarted = true;
+          await addManyToEmailUpdates(jobEmails, userId, webhook, true);
+          await db.run('COMMIT');
+          transactionStarted = false;
+        } catch (error) {
+          if (transactionStarted) {
+            await db.run('ROLLBACK');
+            transactionStarted = false;
+          }
+          console.error('Transaction failed during email processing:', error);
+          throw error;
+        }
+      }
+
+      return { success: true, count: jobEmails.length, storage: storageLoc, emails };
     }
 
     const db = await connectDB();
@@ -84,7 +85,7 @@ export const pollEmails = async (req, res) => {
     }
 
     if (!user.label_id) {
-      return res.status(400).json({ error: 'No Gmail label configured for this user.' });
+      throw new Error('No Gmail label configured for this user.');
     }
 
     let webhook = await cacheUtils.getCache(`discord_webhook:${userId}`);
@@ -95,7 +96,7 @@ export const pollEmails = async (req, res) => {
         [userId]
       );
 
-      if (!activeuser) return res.status(401).json({ error: 'No Authorized User Found' });
+      if (!activeuser) throw new Error('No Authorized User Found');
 
       const { discord_webhook } = decryptMultipleFields(
         activeuser.credentials_encrypted_data,
@@ -160,20 +161,34 @@ export const pollEmails = async (req, res) => {
     // Process all valid job emails in one go
     if (jobEmails.length > 0) {
       try {
-        await db.run('BEGIN TRANSACTION');
         await addManyToEmailUpdates(jobEmails, userId, webhook);
-        await db.run('COMMIT');
       } catch (error) {
-        await db.run('ROLLBACK');
         console.error('Transaction failed during email processing:', error);
-        throw error; // Re-throw to be caught by the outer catch block
+        throw error;
       }
     }
 
-    return res.status(200).json({ success: true, count: jobEmails.length, storage: storageLoc });
+    return { success: true, count: jobEmails.length, storage: storageLoc };
   } catch (error) {
     console.error('Error polling emails:', error);
-    return res.status(500).json({ error: 'Failed to poll emails' });
+    throw error;
+  }
+};
+
+// API endpoint function that uses the core function
+export const pollEmails = async (req, res) => {
+  try {
+    const { userId, testUser } = req;
+
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const result = await pollEmailsCore(userId, testUser);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('Error in pollEmails endpoint:', error);
+    return res.status(500).json({ error: error.message || 'Failed to poll emails' });
   }
 };
 

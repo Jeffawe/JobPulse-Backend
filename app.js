@@ -4,10 +4,11 @@ import dotenv from 'dotenv';
 import jobRoutes from './routes/jobRoute.js';
 import authRoutes from './routes/authRoute.js';
 import { verifyApiKey } from './middleware/apikey.js';
-import { initDB, initApplicationDB } from './db/database.js';
+import { initDB, initApplicationDB, initTestUserLimitsDB } from './db/database.js';
 import { addColumns, deleteDB } from './db/database.js';
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
+import { cacheUtils } from './config/cacheConfig.js';
 
 dotenv.config();
 
@@ -63,10 +64,23 @@ app.get('/', (req, res) => {
 //     }
 // })
 
+app.get('/clear', (req, res) => {
+    try {
+        cacheUtils.clearAllCache();
+        res.status(200).json({
+            status: 'success',
+            message: 'Cleared all cache successfully'
+        });
+    } catch (err) {
+        console.log(err)
+    }
+})
+
 app.get('/setup', (req, res) => {
     try {
         initDB();
         initApplicationDB();
+        initTestUserLimitsDB();
         // addColumns()
         res.status(200).json({
             status: 'success',

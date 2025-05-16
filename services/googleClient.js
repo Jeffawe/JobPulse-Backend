@@ -48,7 +48,7 @@ export const getOAuth2Client = async (userId) => {
     process.env.GOOGLE_REDIRECT_URI
   );
 
-  oauth2Client.setCredentials({ refresh_token: user.refresh_token });
+  oauth2Client.setCredentials({ refresh_token: refresh_token });
   return oauth2Client;
 };
 

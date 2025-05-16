@@ -1,4 +1,4 @@
-import { connectDB } from '../db/database.js';
+import { connectDB, canCreateTestUser } from '../db/database.js';
 import { getOAuth2ClientBasic } from '../services/googleClient.js';
 import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import jwt from 'jsonwebtoken';
@@ -77,18 +77,67 @@ export const authController = {
 
       if (!token) throw new Error("No code provided");
 
+      let firstTime = true;
+
       const oauth2Client = getOAuth2ClientBasic();
 
       const db = await connectDB();
 
+      if (!db) throw new Error("Failed to connect to database");
+
       if (is_test_user) {
+        // Get client IP address - adjust as needed based on your setup
+        const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        // Check if test user creation is allowed for this IP
+        const limitCheck = await cacheUtils.getCache(`testUserLimit:${ipAddress}`);
+
+        let canCreate;
+        if (!limitCheck) {
+          // Check database if not in cache
+          canCreate = await canCreateTestUser(ipAddress);
+          // Cache the result briefly to prevent database hammering
+          await cacheUtils.setCache(`testUserLimit:${ipAddress}`, canCreate, 60); // Cache for 60 seconds
+        } else {
+          canCreate = limitCheck;
+        }
+
+        if (!canCreate.allowed) {
+          // Return appropriate error based on reason
+          let errorMessage = "Test user creation limit reached.";
+          let waitTime = "Please try again later.";
+
+          switch (canCreate.reason) {
+            case 'ip_total_limit':
+              errorMessage = "You've reached the maximum number of test users allowed.";
+              break;
+            case 'ip_daily_limit':
+              errorMessage = "Daily test user creation limit reached.";
+              waitTime = "Please try again tomorrow.";
+              break;
+            case 'system_limit':
+              errorMessage = "System-wide test user limit reached.";
+              break;
+          }
+
+          return res.status(429).json({
+            error: errorMessage,
+            message: waitTime
+          });
+        }
+
         let testUser = await cacheUtils.getCache(`userbasic:${token}`);
 
         if (!testUser) {
           testUser = await db.get(`SELECT * FROM users WHERE id = ?`, [token]);
         }
 
-        if (!testUser) testUser = await generateTestUser(db);
+        if (!testUser) {
+          testUser = await generateTestUser(db);
+          firstTime = true;
+        }
+
+        const message = firstTime ? 'Test user created Successfully' : 'Loading exisitng test user';
 
         const testJwtToken = jwt.sign(
           { userId: testUser.id, is_test_user: true },
@@ -98,7 +147,7 @@ export const authController = {
 
         await cacheUtils.setCache(`userbasic:${testUser.id}`, testUser, CACHE_DURATIONS.USER_PROFILE);
 
-        return res.json({ token: testJwtToken, user: testUser, firstTime: true });
+        return res.json({ token: testJwtToken, user: testUser, firstTime: true, message: message });
       }
 
       // Exchange code for tokens
@@ -115,7 +164,9 @@ export const authController = {
         throw new Error('Failed to retrieve tokens');
       }
 
-      let firstTime = true;
+      if (!tokens.refresh_token) {
+        console.warn('No refresh token received — user might have already granted access before.');
+      }
 
       const oauth2 = google.oauth2({
         auth: oauth2Client,
@@ -251,7 +302,8 @@ export const authController = {
 
       await cacheUtils.setCache(`userbasic:${user.id}`, sanitizedUser, CACHE_DURATIONS.USER_PROFILE);
 
-      res.json({ token: jwtToken, user: sanitizedUser, firstTime: firstTime });
+      const finalMessage = firstTime ? 'User created Successfully' : 'Loading exisitng user';
+      res.json({ token: jwtToken, user: sanitizedUser, firstTime: firstTime, message: finalMessage });
 
     } catch (error) {
       console.error('Google auth error:', error);
@@ -278,7 +330,7 @@ export const authController = {
 
       if (!cachedUser) {
         cachedUser = await db.get(`
-          SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser
+          SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, discord_webhook, isTestUser
           FROM users
           WHERE id = ?
         `, [userId]);
@@ -342,7 +394,7 @@ export const authController = {
 
       const db = await connectDB();
       const user = await db.get(`
-        SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, label_id, isTestUser
+        SELECT id, email, name, notification_value, notification_channel, notification_status, email_addresses, discord_webhook, label_id, isTestUser
         FROM users
         WHERE id = ?
       `, [userId]);
@@ -363,21 +415,34 @@ export const authController = {
     }
 
     const userId = req.params.userId;
+    const email = req.body.email || null;
+
     if (!userId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
 
+    console.log('deleteAccount', userId, req.userId, email);
+
     const db = await connectDB();
-    await db.run('BEGIN TRANSACTION');
+    let transactionStarted = false;
 
     try {
+      await db.run('BEGIN TRANSACTION');
+      transactionStarted = true;
+
       let user = await cacheUtils.getCache(`data:${userId}`);
 
       if (!user) {
-        // Get encrypted credentials
         user = await db.get(
-          `SELECT credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
+          `SELECT id, credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE id = ?`,
           [userId]
+        );
+      }
+
+      if (!user && email) {
+        user = await db.get(
+          `SELECT id, credentials_encrypted_data, credentials_iv, credentials_auth_tag FROM users WHERE email = ?`,
+          [email]
         );
       }
 
@@ -386,8 +451,6 @@ export const authController = {
       }
 
       if (!req.testUser) {
-        // Revoke Google token
-        let revokeAccess = false;
         try {
           const { refresh_token } = decryptMultipleFields(
             user.credentials_encrypted_data,
@@ -404,8 +467,7 @@ export const authController = {
               body: `token=${refresh_token}`
             });
 
-            revokeAccess = response.ok;
-            if (!revokeAccess) {
+            if (!response.ok) {
               console.warn('Failed to revoke Google token: Non-200 response');
             }
           }
@@ -414,23 +476,29 @@ export const authController = {
         }
       }
 
-      // Delete user and related records
-      const deleteUser = await db.run(`DELETE FROM users WHERE id = ?`, [userId]);
+      await db.run(`DELETE FROM application_tracking WHERE user_id = ?`, [user.id]);
+      const deleteUser = await db.run(`DELETE FROM users WHERE id = ?`, [user.id]);
+
       if (deleteUser.changes === 0) {
-        await db.run('ROLLBACK');
-        return res.status(404).json({ error: 'User not found' });
+        throw new Error('User not found');
       }
 
-      await db.run(`DELETE FROM application_tracking WHERE user_id = ?`, [userId]);
-
       await db.run('COMMIT');
-      await cacheUtils.deleteCache(`userbasic:${userId}`);
-      await cacheUtils.deleteCache(`testUser${userId}`);
 
-      res.status(200).json({ message: 'Account deleted and access revoked', revokeAccess });
+      await cacheUtils.deleteCache(`data:${user.id}`);
+      await cacheUtils.deleteCache(`userbasic:${user.id}`);
+      await cacheUtils.deleteCache(`testUser${user.id}`);
+
+      res.status(200).json({ message: 'Account deleted and access revoked' });
 
     } catch (error) {
-      await db.run('ROLLBACK');
+      if (transactionStarted) {
+        try {
+          await db.run('ROLLBACK');
+        } catch (rollbackError) {
+          console.error('Rollback failed:', rollbackError);
+        }
+      }
       console.error('Delete account error:', error);
       res.status(500).json({ error: 'Failed to delete account' });
     }

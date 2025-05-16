@@ -68,7 +68,7 @@ export const cacheUtils = {
     // Get multiple keys from cache
     mget: async (keys) => {
         if (!keys || !keys.length) return [];
-        
+
         try {
             const results = await redisClient.mget(keys);
             return results.map(result => {
@@ -103,6 +103,18 @@ export const cacheUtils = {
             }
         } catch (error) {
             console.error('Cache Clear Pattern Error:', error);
+        }
+    },
+
+    clearAllCache: async () => {
+        try {
+            const keys = await redisClient.keys('*');
+            if (keys.length > 0) {
+                await redisClient.del(keys);
+                console.log(`Cleared ${keys.length} Redis keys.`);
+            }
+        } catch (error) {
+            console.error('Error clearing all Redis cache:', error);
         }
     }
 };

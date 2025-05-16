@@ -1,6 +1,6 @@
 import { Server } from 'socket.io';
 import crypto from 'crypto';
-import { sendToDiscord, saveToSupabase } from '../controllers/jobController.js';
+import { sendToDiscord, saveToSupabase, pollEmailsCore } from '../controllers/jobController.js';
 import { connectDB } from '../db/database.js';
 import { getTestUserEmails } from './testUserEmail.js';
 import { cacheUtils } from '../config/cacheConfig.js';
@@ -8,11 +8,10 @@ import { decryptMultipleFields } from './encryption.js';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { NLPProcessor } from './nlpProcessor.js';
-import { console } from 'inspector';
 
 dotenv.config();
 
-const possibleUpdates = [];
+let possibleUpdates = [];
 const BOT_URL = process.env.BOT_URL;
 
 const emailUpdatesStore = {
@@ -141,7 +140,6 @@ const GetDataFromBot = async (userId, isTestUser, webhookUrl) => {
   if (isTestUser) {
     const rawEmails = await getTestUserEmails(userId);
     const structuredEmails = rawEmails.map(NLPProcessor);
-    console.log(structuredEmails)
     return structuredEmails;
   }
 
@@ -224,68 +222,122 @@ function generateFingerprint(jobTitle, companyName) {
   return hashContent(base);
 }
 
+/**
+ * Process multiple emails in batches and add to tracking system
+ * @param {Array} emails - Array of email objects to process
+ * @param {string} userId - User identifier
+ * @param {string} discord_webhook - Discord webhook URL
+ * @param {boolean} isTestUser - Whether this is a test user
+ * @returns {Promise<number>} - Number of emails successfully processed
+ */
 export const addManyToEmailUpdates = async (emails, userId, discord_webhook, isTestUser = false) => {
+  if (!emails || !Array.isArray(emails) || emails.length === 0) {
+    console.log('No valid emails to process');
+    return 0;
+  }
+
+  if (!userId) {
+    console.error('Missing userId parameter');
+    return 0;
+  }
+
+  // Reset possibleUpdates array for this batch
+  possibleUpdates = [];
+
   const updatedEmails = [];
   const processedEmailIds = new Set();
 
-  const BATCH_SIZE = 50;
-  for (let i = 0; i < emails.length; i += BATCH_SIZE) {
-    const batch = emails.slice(i, i + BATCH_SIZE);
+  // Use smaller batch size for better responsiveness
+  const BATCH_SIZE = 20;
 
-    for (const email of batch) {
-      // Generate a hash to identify this email if no ID exists
-      if (!email.id) {
-        const emailHash = hashContent(email.body);
-        email.id = `email-${emailHash.substring(0, 8)}`;
-      }
+  try {
+    // Process emails in batches to avoid overwhelming the database
+    for (let i = 0; i < emails.length; i += BATCH_SIZE) {
+      const batch = emails.slice(i, i + BATCH_SIZE);
 
-      // Skip if we've already processed this email in this batch
-      if (processedEmailIds.has(email.id)) continue;
+      // Process emails sequentially to avoid SQLite locking issues
+      for (const email of batch) {
+        // Generate a hash to identify this email if no ID exists
+        if (!email.id) {
+          const emailHash = hashContent(email.body);
+          email.id = `email-${emailHash.substring(0, 8)}`;
+        }
 
-      const added = await addToEmailUpdates(email, userId, discord_webhook, isTestUser);
-      if (added) {
-        updatedEmails.push(email);
-        processedEmailIds.add(email.id);
+        // Skip if we've already processed this email in this batch
+        if (processedEmailIds.has(email.id)) continue;
+
+        try {
+          const added = await addToEmailUpdates(email, userId, discord_webhook, isTestUser);
+          if (added) {
+            processedEmailIds.add(email.id);
+            updatedEmails.push(email);
+          }
+        } catch (error) {
+          console.error(`Error processing email ${email.id}:`, error);
+          console.log('Failed to add email', email.id);
+        }
       }
     }
-  }
 
-  // Send batch update to client socket if any were added
-  if (updatedEmails.length > 0 && emailUpdatesStore.connections.has(userId)) {
-    const socket = emailUpdatesStore.connections.get(userId);
-    socket.emit('newEmails', updatedEmails);
-  }
-
-  // Process any updates to existing records in Discord
-  if (possibleUpdates.length > 0) {
-    try {
-      await fetch(`${process.env.BOT_URL}/updateMessages`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.BOT_SECRET}`
-        },
-        body: JSON.stringify(possibleUpdates)
-      });
-      // Clear the updates after processing
-      possibleUpdates.length = 0;
-    } catch (error) {
-      console.error('Failed to update Discord messages:', error);
+    // Send batch update to client socket if any were added
+    if (updatedEmails.length > 0 && emailUpdatesStore.connections?.has(userId)) {
+      const socket = emailUpdatesStore.connections.get(userId);
+      socket.emit('newEmails', updatedEmails);
     }
-  }
 
-  return updatedEmails.length;
+    // Process any updates to existing records in Discord
+    if (possibleUpdates.length > 0) {
+      try {
+        const response = await fetch(`${process.env.BOT_URL}/updateMessages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.BOT_SECRET}`
+          },
+          body: JSON.stringify(possibleUpdates)
+        });
+
+        if (!response.ok) {
+          throw new Error(`Discord update failed with status: ${response.status}`);
+        }
+
+        // Clear the updates after processing
+        possibleUpdates = [];
+      } catch (error) {
+        console.error('Failed to update Discord messages:', error);
+      }
+    }
+
+    return updatedEmails.length;
+  } catch (error) {
+    console.error('Error in addManyToEmailUpdates:', error);
+    return updatedEmails.length; // Return how many we processed successfully before error
+  }
 };
 
+/**
+ * Process a single email and add to tracking system
+ * @param {Object} email - Email object to process
+ * @param {string} userId - User identifier
+ * @param {string} discord_webhook - Discord webhook URL
+ * @param {boolean} isTestUser - Whether this is a test user
+ * @returns {Promise<boolean>} - Whether email was successfully processed
+ */
 export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUser = false) => {
+  // Validate required fields
+  if (!email || !email.body || !userId) {
+    console.error('Missing required parameters for addToEmailUpdates');
+    return false;
+  }
+
   const {
     body,
-    from,
-    application_id,
-    company_name,
-    job_title,
-    jobStatus,
-    date
+    from = '',
+    application_id = '',
+    company_name = '',
+    job_title = '',
+    jobStatus = '',
+    date = new Date().toISOString()
   } = email;
 
   // Generate identifiers first
@@ -295,91 +347,76 @@ export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUs
   // Generate a consistent ID for this email if not provided
   const emailId = email.id || `email-${emailHash.substring(0, 8)}`;
 
-  if (emailUpdatesStore.emailsById.has(emailId)) {
+  // Check if we've already processed this email
+  if (emailUpdatesStore.emailsById?.has(emailId)) {
     return false;
   }
 
-  if (isTestUser) {
-    try {
-      email.id = emailId;
-      email.metadata = {
-        receivedAt: new Date().toISOString(),
-        source: 'new',
-        storageLocation: 'storage',
-        userId
-      };
+  // Get DB connection with error handling
+  let db;
+  try {
+    db = await connectDB();
 
-      // Update in-memory storage
-      emailUpdatesStore.emailsById.set(emailId, email);
-
-      // Only keep a reasonable number of items in the queue (e.g., latest 1000)
-      const MAX_QUEUE_SIZE = 1000;
-      if (emailUpdatesStore.queue.length >= MAX_QUEUE_SIZE) {
-        const oldestEmail = emailUpdatesStore.queue.shift();
-        // Remove from Map if it's not referenced elsewhere
-        if (oldestEmail && oldestEmail.id) {
-          emailUpdatesStore.emailsById.delete(oldestEmail.id);
-        }
-      }
-
-      emailUpdatesStore.queue.push(email);
-      return true
+    // Verify db connection has required methods
+    if (!db || typeof db.run !== 'function' || typeof db.get !== 'function') {
+      throw new Error('Invalid database connection - missing required methods');
     }
-    catch (error) {
-      console.error('Failed to add email to memory store:', error);
-      return false;
-    }
+  } catch (error) {
+    console.error('Failed to connect to database:', error);
+    return false;
   }
 
-  const db = connectDB();
-  if (!db) return false;
+  let possibleUpdate = null;
+  let discord_id = null;
 
   try {
     // Use transaction for database consistency
     await db.run('BEGIN TRANSACTION');
+    let success = false;
 
     // Check if this exact email exists
     const existing = await db.get(
-      `SELECT * FROM application_tracking WHERE hash = ?`,
-      [emailHash]
+      `SELECT * FROM application_tracking WHERE hash = ? AND user_id = ?`,
+      [emailHash, userId]
     );
 
-    if (existing) {
-      await db.run('COMMIT');
-      return false; // Email already exists
-    }
+    if (!existing) {
+      // Look for a possible update to an existing application
+      possibleUpdate = await db.get(`
+        SELECT * FROM application_tracking 
+        WHERE (
+          (application_id = ? AND company_name = ?) OR 
+          (fingerprint = ? AND application_id = ?) OR 
+          (job_title = ? AND company_name = ?)
+        ) AND user_id = ?
+      `, [application_id, company_name, fingerprint, application_id, job_title, company_name, userId]);
 
-    const possibleUpdate = await db.get(`
-      SELECT * FROM application_tracking 
-      WHERE (
-        (application_id = ? AND company_name = ?) OR 
-        (fingerprint = ? AND application_id = ?) OR 
-        (job_title = ? AND company_name = ?)
-      ) AND user_id = ?
-    `, [application_id, company_name, fingerprint, application_id, job_title, company_name, userId]);
+      discord_id = possibleUpdate?.discord_msg_id ?? null;
 
-    let success = false;
-    let discord_id = possibleUpdate?.discord_msg_id ?? null;
-
-    if (possibleUpdate) {
-      success = true;
-    } else {
-      // Handle external storage (Discord or Supabase)
-      if (discord_webhook && discord_webhook !== "NULL") {
-        const result = await sendToDiscord(discord_webhook, email);
-        if (result.success) {
-          success = true;
-          discord_id = result.messageId;
+      if (possibleUpdate) {
+        success = true;
+      } else if (discord_webhook && discord_webhook !== "NULL") {
+        // Only send to Discord if we don't have an existing record
+        try {
+          const result = await sendToDiscord(discord_webhook, email);
+          if (result?.success) {
+            success = true;
+            discord_id = result.messageId;
+          }
+        } catch (discordError) {
+          console.error('Discord send failed:', discordError);
         }
-
-      } else {
-        success = await saveToSupabase(userId, email);
+      } else if (isTestUser && discord_webhook === "NULL" || !discord_webhook) {
+        success = true;
       }
+    } else {
+      // Email already exists in database
+      success = true;
     }
 
     if (success) {
-      // If this is an update to an existing application
       if (possibleUpdate) {
+        // Add to updates queue for Discord processing
         possibleUpdates.push({
           discord_msg_id: possibleUpdate.discord_msg_id,
           discord_webhook: discord_webhook,
@@ -389,18 +426,19 @@ export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUs
           emailSnippet: body.slice(0, 300)
         });
 
+        // Update status and timestamp
         await db.run(`
           UPDATE application_tracking 
           SET current_status = ?, last_updated = ? 
           WHERE hash = ?
         `, [jobStatus, date, possibleUpdate.hash]);
-      } else {
+      } else if (!existing) {
         // Insert the new email record
         await db.run(`
-        INSERT INTO application_tracking 
-        (hash, user_id, fingerprint, email_address, application_id, company_name, job_title, discord_msg_id, current_status, last_updated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
+          INSERT INTO application_tracking 
+          (hash, user_id, fingerprint, email_address, application_id, company_name, job_title, discord_msg_id, current_status, last_updated)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
           emailHash,
           userId,
           fingerprint,
@@ -423,20 +461,24 @@ export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUs
         userId
       };
 
-      // Update in-memory storage
-      emailUpdatesStore.emailsById.set(emailId, email);
+      // Safely update in-memory storage
+      if (emailUpdatesStore.emailsById) {
+        emailUpdatesStore.emailsById.set(emailId, email);
 
-      // Only keep a reasonable number of items in the queue (e.g., latest 1000)
-      const MAX_QUEUE_SIZE = 1000;
-      if (emailUpdatesStore.queue.length >= MAX_QUEUE_SIZE) {
-        const oldestEmail = emailUpdatesStore.queue.shift();
-        // Remove from Map if it's not referenced elsewhere
-        if (oldestEmail && oldestEmail.id) {
-          emailUpdatesStore.emailsById.delete(oldestEmail.id);
+        // Only keep a reasonable number of items in the queue
+        const MAX_QUEUE_SIZE = 1000;
+        if (emailUpdatesStore.queue && emailUpdatesStore.queue.length >= MAX_QUEUE_SIZE) {
+          const oldestEmail = emailUpdatesStore.queue.shift();
+          // Remove from Map if it's not referenced elsewhere
+          if (oldestEmail && oldestEmail.id) {
+            emailUpdatesStore.emailsById.delete(oldestEmail.id);
+          }
+        }
+
+        if (emailUpdatesStore.queue) {
+          emailUpdatesStore.queue.push(email);
         }
       }
-
-      emailUpdatesStore.queue.push(email);
 
       await db.run('COMMIT');
       return true;
@@ -445,7 +487,12 @@ export const addToEmailUpdates = async (email, userId, discord_webhook, isTestUs
       return false;
     }
   } catch (error) {
-    await db.run('ROLLBACK');
+    // Ensure transaction is rolled back on error
+    try {
+      await db.run('ROLLBACK');
+    } catch (rollbackError) {
+      console.error('Rollback failed:', rollbackError);
+    }
     console.error('Error in addToEmailUpdates:', error);
     return false;
   }
@@ -460,13 +507,20 @@ export const getEmails = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const { refresh } = req.query;
+    let result = true;
 
     if (refresh === 'true') {
       await refreshCacheIfNeeded(userId, testUser);
+    } else {
+      if (testUser) {
+        await refreshCacheIfNeeded(userId, testUser);
+      } else {
+        result = await pollEmailsCore(userId, testUser);
+      }
     }
 
     const emails = getEmailsFromCache(userId);
-    res.json({ success: true, emails });
+    res.json({ success: result, emails });
   } catch (error) {
     console.error('Error in getEmails:', error);
     res.status(500).json({ error: 'Internal Server Error' });
