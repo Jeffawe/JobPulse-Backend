@@ -4,7 +4,7 @@ import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { google } from 'googleapis';
-import { encryptMultipleFields, decryptMultipleFields } from '../services/encryption.js';
+import { encryptMultipleFields, decryptMultipleFields } from '../services/secrets/encryption.js';
 import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();

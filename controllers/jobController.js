@@ -1,5 +1,5 @@
 import { addManyToEmailUpdates } from '../services/memoryStore.js';
-import { NLPProcessor } from '../services/nlpProcessor.js';
+import { NLPProcessor } from '../services/secrets/nlpProcessor.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 import { createClient } from '@supabase/supabase-js';
 import { connectDB } from '../db/database.js';
@@ -7,7 +7,7 @@ import { google } from 'googleapis';
 import { createGmailFilter } from './authController.js';
 import { cacheUtils, CACHE_DURATIONS } from '../config/cacheConfig.js';
 import { getTestUserEmails } from '../services/testUserEmail.js';
-import { decryptMultipleFields } from '../services/encryption.js';
+import { decryptMultipleFields } from '../services/secrets/encryption.js';
 
 const extractEmailFields = (email) => {
   const headers = email.payload.headers;

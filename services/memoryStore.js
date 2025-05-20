@@ -4,10 +4,10 @@ import { sendToDiscord, saveToSupabase, pollEmailsCore } from '../controllers/jo
 import { connectDB } from '../db/database.js';
 import { getTestUserEmails } from './testUserEmail.js';
 import { cacheUtils } from '../config/cacheConfig.js';
-import { decryptMultipleFields } from './encryption.js';
+import { decryptMultipleFields } from './secrets/encryption.js';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
-import { NLPProcessor } from './nlpProcessor.js';
+import { NLPProcessor } from './secrets/nlpProcessor.js';
 
 dotenv.config();
 

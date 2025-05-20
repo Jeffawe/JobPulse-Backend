@@ -1,7 +1,7 @@
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
 import { connectDB } from '../db/database.js';
-import { decryptMultipleFields } from './encryption.js';
+import { decryptMultipleFields } from './secrets/encryption.js';
 import { cacheUtils } from '../config/cacheConfig.js';
 
 dotenv.config();
