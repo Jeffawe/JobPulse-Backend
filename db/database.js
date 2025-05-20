@@ -2,8 +2,21 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import fs from 'fs';
 import path from 'path';
+import dotenv from 'dotenv';
+import os from 'os';
 
-const dbPath = '../db/database.sqlite';
+dotenv.config();
+
+db_state = process.env.DB_STATE;
+let dbPath;
+
+if (db_state === 'local') {
+  dbPath = '../db/database.sqlite';
+} else {
+  const homeDir = os.homedir(); // "/home/somua"
+  dbPath = path.resolve(homeDir, 'sqldb/database.sqlite');
+}
+
 let dbInstance;
 
 export const addColumns = async () => {
@@ -94,9 +107,9 @@ const ensureDBFolderExists = () => {
 
 export const initTestUserLimitsDB = async () => {
   ensureDBFolderExists();
-  
+
   const db = await connectDB();
-  
+
   await db.exec(`
     CREATE TABLE IF NOT EXISTS test_user_limits (
       ip_address TEXT PRIMARY KEY,
@@ -105,25 +118,25 @@ export const initTestUserLimitsDB = async () => {
       last_created_at TEXT DEFAULT (datetime('now'))
     );
   `);
-  
+
   return db;
 };
 
 // New function to track and limit test user creation
 export const canCreateTestUser = async (ipAddress) => {
   const db = await connectDB();
-  
+
   try {
     // First, check system-wide limit
     const { count: totalTestUsers } = await db.get(
       'SELECT COUNT(*) as count FROM users WHERE isTestUser = 1'
     );
-    
+
     const SYSTEM_LIMIT = 500; // Adjust as needed
     if (totalTestUsers >= SYSTEM_LIMIT) {
       return { allowed: false, reason: 'system_limit' };
     }
-    
+
     // Then check IP-specific limit
     await db.run(`
       INSERT INTO test_user_limits (ip_address, count)
@@ -132,35 +145,35 @@ export const canCreateTestUser = async (ipAddress) => {
         count = count + 1,
         last_created_at = datetime('now')
     `, [ipAddress]);
-    
+
     const result = await db.get(
       'SELECT count, first_created_at FROM test_user_limits WHERE ip_address = ?',
       [ipAddress]
     );
-    
+
     const IP_LIMIT = 5; // Adjust as needed
     const IP_DAILY_LIMIT = 2; // Adjust as needed
-    
+
     // Check total limit per IP
     if (result.count > IP_LIMIT) {
       return { allowed: false, reason: 'ip_total_limit' };
     }
-    
+
     // Check daily limit per IP
     const dayAgo = new Date();
     dayAgo.setDate(dayAgo.getDate() - 1);
     const dayAgoStr = dayAgo.toISOString();
-    
+
     const { count: recentCount } = await db.get(
       `SELECT COUNT(*) as count FROM test_user_limits 
        WHERE ip_address = ? AND datetime(last_created_at) > datetime(?)`,
       [ipAddress, dayAgoStr]
     );
-    
+
     if (recentCount > IP_DAILY_LIMIT) {
       return { allowed: false, reason: 'ip_daily_limit' };
     }
-    
+
     return { allowed: true };
   } catch (error) {
     console.error('[ERROR] Failed to check test user limits:', error);
