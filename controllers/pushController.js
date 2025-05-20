@@ -1,11 +1,11 @@
 import { google } from 'googleapis';
 import { connectDB } from '../db/database.js';
 import { v4 as uuidv4 } from 'uuid';
-import { NLPProcessor } from '../services/nlpProcessor.js';
+import { NLPProcessor } from '../services/secrets/nlpProcessor.js';
 import { addManyToEmailUpdates } from '../services/memoryStore.js';
 import { getOAuth2Client } from '../services/googleClient.js';
 import { cacheUtils } from '../config/cacheConfig.js';
-import { encryptMultipleFields, decryptMultipleFields } from '../services/encryption.js';
+import { encryptMultipleFields, decryptMultipleFields } from '../services/secrets/encryption.js';
 
 // Setup Gmail push notifications for a user
 export const setupGmailPushNotifications = async (req, res) => {

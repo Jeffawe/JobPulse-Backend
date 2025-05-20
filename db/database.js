@@ -7,7 +7,7 @@ import os from 'os';
 
 dotenv.config();
 
-db_state = process.env.DB_STATE;
+const db_state = process.env.DB_STATE;
 let dbPath;
 
 if (db_state === 'local') {
