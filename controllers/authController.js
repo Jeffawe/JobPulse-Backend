@@ -476,8 +476,31 @@ export const authController = {
         }
       }
 
+      if (req.testUser) {
+        await cacheUtils.deleteCache(`testUser${user.id}`);
+
+        const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+        if (ipAddress) {
+          const ipExists = await db.get(
+            `SELECT count FROM test_user_limits WHERE ip_address = ?`,
+            [ipAddress]
+          );
+
+          if (ipExists) {
+            await db.run(
+              `UPDATE test_user_limits 
+             SET count = count - 1 
+             WHERE ip_address = ? AND count > 0`,
+              [ipAddress]
+            );
+          }
+        }
+      }
+
       await db.run(`DELETE FROM application_tracking WHERE user_id = ?`, [user.id]);
       const deleteUser = await db.run(`DELETE FROM users WHERE id = ?`, [user.id]);
+
 
       if (deleteUser.changes === 0) {
         throw new Error('User not found');
