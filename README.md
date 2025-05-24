@@ -43,6 +43,7 @@ JobPulse is an email-based job tracking tool that integrates with Discord to hel
 ```bash
 git clone https://github.com/your-username/JobPulse-Backend.git
 cd JobPulse-Backend
+```
 
 ### 2. Set Up Environment Variables
 
