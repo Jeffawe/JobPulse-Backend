@@ -1,6 +1,6 @@
 # JobPulse Backend
 
-JobPulse is an email-based job tracking tool that integrates with Discord to help users manage and monitor their job applications efficiently. This repository contains the backend service built using Node.js and Express, connected to a lightweight SQLite database and Redis for temporary state handling. The backend handles email polling, user session management, integrations, and webhook processing.
+JobPulse is an email-based job tracking tool that integrates with Discord to help users manage and monitor their job applications efficiently. This repository contains the backend service built using Node.js and Express, which is connected to a lightweight SQLite database and Redis for temporary state handling. The backend handles email polling, user session management, integrations, and webhook processing. 
 
 🌐 **Live Frontend:** [Job Pulse](https://job-pulse1.vercel.app)  
 📦 **Frontend Repo:** [Frontend](https://github.com/Jeffawe/JobPulse)
@@ -30,6 +30,7 @@ JobPulse is an email-based job tracking tool that integrates with Discord to hel
 ---
 
 ## 🛠️ Getting Started
+If you want to set up your version of this, follow these guidelines. Otherwise, check it out at [Job Pulse](https://job-pulse1.vercel.app)  
 
 ### Prerequisites
 
@@ -59,7 +60,7 @@ REDIS_PASSWORD=Set Values
 API_KEY=Set Values
 REDIS_HOST=Set Values
 REDIS_PORT=Set Values
-PORT=Set Values
+PORT=5000
 NODE_ENV=Set Values
 GOOGLE_REDIRECT_URI=Set Values
 BOT_SECRET=Set Values
@@ -69,7 +70,7 @@ DISCORD_WEBHOOK_URL=Set Values
 DB_STATE="local"
 ```
 
-### 2.  Start SQLite & Redis via Docker Compose
+### 3.  Start SQLite & Redis via Docker Compose
 ```bash
 docker-compose up -d
 ```
@@ -77,3 +78,24 @@ docker-compose up -d
 This will start:
 - A SQLite container that mounts your ./db folder.
 - A Redis container.
+
+### 4.  Install Dependencies
+```bash
+npm install
+```
+
+### 5.  Start the Server
+```bash
+npm run dev
+```
+The backend will run on http://localhost:5000
+
+
+## 📦 Frontend Setup
+To run or deploy your own version of the frontend, fork the repository below and follow its README for configuration:
+
+👉 [Frontend Repository](https://github.com/Jeffawe/JobPulse)
+
+
+## 📄 License
+MIT License — feel free to use and modify.
