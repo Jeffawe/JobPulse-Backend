@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import jobRoutes from './routes/jobRoute.js';
 import authRoutes from './routes/authRoute.js';
+import googleRoutes from './routes/googleRoute.js';
 import { verifyApiKey } from './middleware/apikey.js';
 import { initDB, initApplicationDB, initTestUserLimitsDB } from './db/database.js';
 import { addColumns, deleteDB } from './db/database.js';
@@ -102,5 +103,6 @@ app.get('/health', (req, res) => {
 //app.use('/api/jobs', jobRoutes);
 app.use('/api/auth', verifyApiKey, authRoutes);
 app.use('/api/job', verifyApiKey, jobRoutes);
+app.use('/api/google', googleRoutes);
 
 export default app;

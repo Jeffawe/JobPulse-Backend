@@ -1,7 +1,6 @@
 import express from 'express';
 import { 
     setupGmailPushNotifications, 
-    handleGmailPushNotification,
     refreshGmailWatch 
   } from '../controllers/pushController.js';
 import { pollEmails, migrateOldMessages } from '../controllers/jobController.js';
@@ -13,10 +12,6 @@ const router = express.Router();
 // Route to set up Gmail push notifications for a user
 // This should be called when a user connects their Gmail account
 router.post('/setup-gmail-push', authenticateToken, setupGmailPushNotifications);
-
-// Endpoint that receives push notifications from Google Pub/Sub
-// This should be publicly accessible (no auth) with proper validation inside
-router.post('/gmail-webhook', handleGmailPushNotification);
 
 router.post('/migrate', authenticateToken, migrateOldMessages)
 
