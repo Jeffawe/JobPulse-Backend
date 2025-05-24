@@ -1,0 +1,19 @@
+services:
+  sqlite:
+    image: nouchka/sqlite3
+    container_name: jobpulse-sqlite
+    volumes:
+      - ./db:/root/db
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  redis:
+    image: redis:7
+    container_name: jobpulse-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
