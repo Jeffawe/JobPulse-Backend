@@ -67,3 +67,13 @@ BOT_URL=Set Values
 ENCRYPTION_KEY=Set Values
 DISCORD_WEBHOOK_URL=Set Values
 DB_STATE="local"
+```
+
+### 2.  Start SQLite & Redis via Docker Compose
+```bash
+docker-compose up -d
+```
+
+This will start:
+- A SQLite container that mounts your ./db folder.
+- A Redis container.
