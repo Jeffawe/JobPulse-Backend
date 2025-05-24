@@ -2,7 +2,7 @@
 
 JobPulse is an email-based job tracking tool that integrates with Discord to help users manage and monitor their job applications efficiently. This repository contains the backend service built using Node.js and Express, connected to a lightweight SQLite database and Redis for temporary state handling. The backend handles email polling, user session management, integrations, and webhook processing.
 
-🌐 **Live Frontend:** [job.vercel.app](https://job.vercel.app)  
+🌐 **Live Frontend:** [job.vercel.app](https://job-pulse1.vercel.app)  
 📦 **Frontend Repo:** [jeffawe/Frontend](https://github.com/jeffawe/Frontend)
 
 ---
