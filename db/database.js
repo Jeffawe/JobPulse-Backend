@@ -8,6 +8,7 @@ import os from 'os';
 dotenv.config();
 
 const db_state = process.env.DB_STATE;
+const IP_LIMIT = process.env.IP_LIMIT || 5;
 let dbPath;
 
 if (db_state === 'local') {
@@ -113,6 +114,7 @@ export const initTestUserLimitsDB = async () => {
   await db.exec(`
     CREATE TABLE IF NOT EXISTS test_user_limits (
       ip_address TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
       count INTEGER DEFAULT 1,
       first_created_at TEXT DEFAULT (datetime('now')),
       last_created_at TEXT DEFAULT (datetime('now'))
@@ -123,8 +125,11 @@ export const initTestUserLimitsDB = async () => {
 };
 
 // New function to track and limit test user creation
-export const canCreateTestUser = async (ipAddress) => {
+export const canCreateTestUser = async (ipAddress, email) => {
   const db = await connectDB();
+  if (!ipAddress || !email) {
+    return { allowed: false, reason: 'missing_parameters' };
+  }
 
   try {
     // First, check system-wide limit
@@ -137,47 +142,61 @@ export const canCreateTestUser = async (ipAddress) => {
       return { allowed: false, reason: 'system_limit' };
     }
 
-    // Then check IP-specific limit
-    await db.run(`
-      INSERT INTO test_user_limits (ip_address, count)
-      VALUES (?, 1)
-      ON CONFLICT(ip_address) DO UPDATE SET
-        count = count + 1,
-        last_created_at = datetime('now')
-    `, [ipAddress]);
+    const existingEmail = await db.get(
+      'SELECT email FROM test_user_limits WHERE email = ?',
+      [email]
+    );
 
-    const result = await db.get(
+    if (existingEmail) {
+      return { allowed: false, reason: 'email_already_used' };
+    }
+
+    const currentRecord = await db.get(
       'SELECT count, first_created_at FROM test_user_limits WHERE ip_address = ?',
       [ipAddress]
     );
 
-    const IP_LIMIT = 5; // Adjust as needed
-    const IP_DAILY_LIMIT = 2; // Adjust as needed
-
     // Check total limit per IP
-    if (result.count > IP_LIMIT) {
+    if (currentRecord && currentRecord.count >= IP_LIMIT) {
       return { allowed: false, reason: 'ip_total_limit' };
     }
 
-    // Check daily limit per IP
+    // Check daily limit per IP - count actual user creations in last 24 hours
     const dayAgo = new Date();
-    dayAgo.setDate(dayAgo.getDate() - 1);
+    dayAgo.setHours(dayAgo.getHours() - 24);
     const dayAgoStr = dayAgo.toISOString();
 
-    const { count: recentCount } = await db.get(
-      `SELECT COUNT(*) as count FROM test_user_limits 
-       WHERE ip_address = ? AND datetime(last_created_at) > datetime(?)`,
-      [ipAddress, dayAgoStr]
+    const { count: recentUserCount } = await db.get(
+      `SELECT COUNT(*) as count FROM users 
+       WHERE isTestUser = 1 
+       AND email LIKE '%@testing.com'
+       AND datetime(created_at) > datetime(?)
+       AND email IN (
+         SELECT email FROM test_user_limits WHERE ip_address = ?
+       )`,
+      [dayAgoStr, ipAddress]
     );
 
-    if (recentCount > IP_DAILY_LIMIT) {
+    const IP_DAILY_LIMIT = 2;
+    if (recentUserCount >= IP_DAILY_LIMIT) {
       return { allowed: false, reason: 'ip_daily_limit' };
     }
+
+    // If we get here, creation is allowed
+    // Insert/update the record
+    await db.run(`
+      INSERT INTO test_user_limits (ip_address, email, count)
+      VALUES (?, ?, 1)
+      ON CONFLICT(ip_address) DO UPDATE SET
+        count = count + 1,
+        last_created_at = datetime('now')
+    `, [ipAddress, email]);
 
     return { allowed: true };
   } catch (error) {
     console.error('[ERROR] Failed to check test user limits:', error);
-    // If there's an error, be conservative and disallow
     return { allowed: false, reason: 'error' };
+  } finally {
+    await db.close();
   }
 };

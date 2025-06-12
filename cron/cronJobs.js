@@ -25,21 +25,33 @@ cron.schedule('0 0 * * 0', async () => {
     );
 
     const userIds = testUsersToDelete.map(user => user.id);
-    
+    const emails = testUsersToDelete.map(user => user.email);
+
     // If there are users to delete, remove their application tracking data
     let appTrackingDeleted = 0;
+    let testUserLimitsDeleted = 0;
+
     if (userIds.length > 0) {
-      // Convert array to comma-separated string for the IN clause
       const userIdsStr = userIds.join(',');
-      
-      // Delete related application tracking records
+
+      // Delete application tracking records
       const appTrackingResult = await db.run(
         `DELETE FROM application_tracking WHERE user_id IN (${userIdsStr})`
       );
       appTrackingDeleted = appTrackingResult.changes || 0;
+
+      // Delete test_user_limits records by email
+      if (emails.length > 0) {
+        const emailPlaceholders = emails.map(() => '?').join(',');
+        const testLimitsResult = await db.run(
+          `DELETE FROM test_user_limits WHERE email IN (${emailPlaceholders})`,
+          emails
+        );
+        testUserLimitsDeleted = testLimitsResult.changes || 0;
+      }
     }
 
-    // Then delete the test users
+    // Delete the test users
     const userResult = await db.run(
       `DELETE FROM users
        WHERE email LIKE '%@testing.com'
@@ -48,16 +60,13 @@ cron.schedule('0 0 * * 0', async () => {
       threshold
     );
 
-    // Commit the transaction
     await db.run('COMMIT');
 
-    console.log(`[CRON] Deleted ${userResult.changes || 0} old test users and ${appTrackingDeleted} related application tracking records.`);
+    console.log(`[CRON] Deleted ${userResult.changes || 0} old test users, ${appTrackingDeleted} application tracking records, and ${testUserLimitsDeleted} test user limit records.`);
   } catch (error) {
-    // Rollback the transaction in case of error
     await db.run('ROLLBACK');
     console.error('[CRON ERROR] Failed during test user cleanup:', error);
   } finally {
-    // Close the database connection
     await db.close();
   }
 });
